@@ -1,0 +1,134 @@
+# t/test_arrow.stk — round-trip tests against the helper binary.
+#
+# Skips the entire file with a clear note when the helper isn't built yet.
+# Run `cargo build --release` or `make` first.
+
+require "./lib/Arrow.stk"
+require "./lib/Parquet.stk"
+require "./lib/IPC.stk"
+require "./lib/CSV.stk"
+require "./lib/JSON.stk"
+
+my $have_helper = eval { Arrow::helper_path(); 1 }
+unless ($have_helper) {
+    p "1..0 # SKIP helper not built — run `cargo build --release` first"
+    exit 0
+}
+
+# Tiny dataset that exercises ints, floats, strings, nulls.
+my @rows = (
+    { id => 1, name => "alice",   score => 1.5,  city => "ny" },
+    { id => 2, name => "bob",     score => 2.0,  city => undef },
+    { id => 3, name => "charlie", score => 3.25, city => "sf" },
+    { id => 4, name => "dana",    score => 4.0,  city => "la" },
+)
+
+my $tmp = "/tmp/stryke-arrow-test-$$"
+mkdir $tmp unless -d $tmp
+
+my @tests = (
+    { name => "parquet round-trip", file => "$tmp/x.parquet" },
+    { name => "ipc round-trip",     file => "$tmp/x.arrow"   },
+    { name => "csv round-trip",     file => "$tmp/x.csv"     },
+    { name => "json round-trip",    file => "$tmp/x.json"    },
+    { name => "feather round-trip", file => "$tmp/x.feather" },
+)
+my $plan = scalar(@tests) * 3 + 4
+p "1..$plan"
+
+my $i = 0
+for my $t (@tests) {
+    my $path = $t->{file}
+    my $name = $t->{name}
+
+    eval {
+        Arrow::write($path, \@rows)
+        $i++
+        p "ok $i - $name write"
+    }
+    if ($@) {
+        $i++
+        p "not ok $i - $name write: $@"
+        $i++
+        p "not ok $i - $name read skipped"
+        $i++
+        p "not ok $i - $name rowcount skipped"
+        next
+    }
+
+    my @back
+    eval { @back = Arrow::read($path) }
+    $i++
+    if ($@) {
+        p "not ok $i - $name read: $@"
+    } else {
+        my $ok = scalar(@back) == scalar(@rows) && $back[0]->{name} eq "alice"
+        p ($ok ? "ok $i - $name read" : "not ok $i - $name read (got " . scalar(@back) . " rows)")
+    }
+
+    my $stats
+    eval { $stats = Arrow::stats($path) }
+    $i++
+    if ($@) {
+        p "not ok $i - $name stats: $@"
+    } else {
+        my $ok = $stats->{num_rows} == 4 && $stats->{num_columns} == 4
+        p ($ok ? "ok $i - $name stats" : "not ok $i - $name stats (rows=$stats->{num_rows} cols=$stats->{num_columns})")
+    }
+}
+
+# schema test: parquet
+my $sch
+eval { $sch = Arrow::schema("$tmp/x.parquet") }
+$i++
+if ($@) {
+    p "not ok $i - parquet schema: $@"
+} else {
+    my $ok = ref($sch->{fields}) eq "ARRAY" && scalar(@{ $sch->{fields} }) == 4
+    p ($ok ? "ok $i - parquet schema" : "not ok $i - parquet schema bad shape")
+}
+
+# columnar test
+my $cw
+eval { $cw = Arrow::read_columnar("$tmp/x.parquet") }
+$i++
+if ($@) {
+    p "not ok $i - parquet read_columnar: $@"
+} else {
+    my $ok = $cw->{num_rows} == 4
+              && ref($cw->{columns}) eq "HASH"
+              && exists $cw->{columns}{id}
+    p ($ok ? "ok $i - parquet read_columnar" : "not ok $i - parquet read_columnar bad shape")
+}
+
+# convert: parquet → csv
+my $rc
+eval { $rc = Arrow::convert("$tmp/x.parquet", "$tmp/conv.csv") }
+$i++
+if ($@) {
+    p "not ok $i - convert parquet→csv: $@"
+} else {
+    my $ok = -e "$tmp/conv.csv" && -s "$tmp/conv.csv" > 0
+    p ($ok ? "ok $i - convert parquet→csv" : "not ok $i - convert parquet→csv empty")
+}
+
+# column projection
+my @proj
+eval { @proj = Arrow::read("$tmp/x.parquet", columns => ["id", "name"]) }
+$i++
+if ($@) {
+    p "not ok $i - parquet column projection: $@"
+} else {
+    my $ok = scalar(@proj) == 4
+              && !exists $proj[0]->{score}
+              && exists $proj[0]->{id}
+              && exists $proj[0]->{name}
+    p ($ok ? "ok $i - parquet column projection" : "not ok $i - parquet column projection wrong fields")
+}
+
+# cleanup
+for my $t (@tests) {
+    unlink $t->{file} if -e $t->{file}
+}
+unlink "$tmp/conv.csv" if -e "$tmp/conv.csv"
+rmdir $tmp if -d $tmp

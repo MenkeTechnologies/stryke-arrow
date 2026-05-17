@@ -1,0 +1,19 @@
+[package]
+name = "arrow"
+version = "0.1.0"
+description = "Apache Arrow + Parquet + IPC + Feather + arrow-CSV/JSON for stryke. Opt-in package tier; keeps the stryke core binary slim."
+authors = ["MenkeTechnologies"]
+license = "MIT"
+repository = "https://github.com/MenkeTechnologies/stryke-arrow"
+edition = "2026"
+
+[bin]
+arrow = "bin/arrow.stk"
+arrow-build = "bin/arrow-build.stk"
+
+[scripts]
+build = "cargo build --release"
+build-debug = "cargo build"
+clean = "cargo clean"
+test = "s test t/"
+install = "s pkg install -g ."

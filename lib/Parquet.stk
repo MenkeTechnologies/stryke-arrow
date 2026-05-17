@@ -1,0 +1,53 @@
+# lib/Parquet.stk — `use Arrow::Parquet`
+#
+# Thin wrappers that pin format=parquet on every call. You can also call
+# `Arrow::read("f.parquet")` directly — extension-based detection handles it.
+#
+# Internal calls pass a hashref because stryke drops `%opts` re-flatten
+# across required-file fn boundaries; the public surface still accepts
+# named-args.
+
+package Arrow::Parquet
+
+use Arrow
+
+fn Arrow::Parquet::read ($path, %opts) {
+    $opts{format} = "parquet"
+    Arrow::_read_impl($path, \%opts)
+}
+
+fn Arrow::Parquet::read_stream ($path, %opts) {
+    $opts{format} = "parquet"
+    Arrow::read_stream($path, %opts)
+}
+
+fn Arrow::Parquet::read_columnar ($path, %opts) {
+    $opts{format} = "parquet"
+    Arrow::_read_columnar_impl($path, \%opts)
+}
+
+fn Arrow::Parquet::write ($path, $rows, %opts) {
+    $opts{format} = "parquet"
+    $opts{compression} //= "snappy"
+    Arrow::_write_impl($path, $rows, \%opts)
+}
+
+fn Arrow::Parquet::write_iter ($path, $iter, %opts) {
+    $opts{format} = "parquet"
+    $opts{compression} //= "snappy"
+    Arrow::write_iter($path, $iter, %opts)
+}
+
+fn Arrow::Parquet::schema ($path) {
+    Arrow::_schema_impl($path, { format => "parquet" })
+}
+
+fn Arrow::Parquet::stats ($path) {
+    Arrow::_stats_impl($path, { format => "parquet" })
+}
+
+fn Arrow::Parquet::row_count ($path) {
+    Arrow::_stats_impl($path, { format => "parquet" })->{num_rows}
+}
+
+1

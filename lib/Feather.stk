@@ -1,0 +1,40 @@
+# lib/Feather.stk — `use Arrow::Feather` (Feather v2 == Arrow IPC, alias)
+
+package Arrow::Feather
+
+use Arrow
+
+fn Arrow::Feather::read ($path, %opts) {
+    $opts{format} = "feather"
+    Arrow::_read_impl($path, \%opts)
+}
+
+fn Arrow::Feather::read_stream ($path, %opts) {
+    $opts{format} = "feather"
+    Arrow::read_stream($path, %opts)
+}
+
+fn Arrow::Feather::read_columnar ($path, %opts) {
+    $opts{format} = "feather"
+    Arrow::_read_columnar_impl($path, \%opts)
+}
+
+fn Arrow::Feather::write ($path, $rows, %opts) {
+    $opts{format} = "feather"
+    Arrow::_write_impl($path, $rows, \%opts)
+}
+
+fn Arrow::Feather::write_iter ($path, $iter, %opts) {
+    $opts{format} = "feather"
+    Arrow::write_iter($path, $iter, %opts)
+}
+
+fn Arrow::Feather::schema ($path) {
+    Arrow::_schema_impl($path, { format => "feather" })
+}
+
+fn Arrow::Feather::stats ($path) {
+    Arrow::_stats_impl($path, { format => "feather" })
+}
+
+1

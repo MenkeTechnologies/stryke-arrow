@@ -1,0 +1,27 @@
+#!/usr/bin/env stryke
+# examples/read_parquet.stk — load a parquet file as rows.
+#
+# Run:    s examples/read_parquet.stk /path/to/file.parquet
+
+use Arrow
+
+my $path = $ARGV[0]
+die "usage: read_parquet.stk PATH.parquet\n" unless defined $path
+
+# Schema first (cheap: footer only).
+my $sch = Arrow::schema($path)
+p "fields: " . join(", ", map { $_->{name} . ":" . $_->{type} } @{ $sch->{fields} })
+
+# Total rows from parquet footer (no scan).
+p "rows:   " . Arrow::row_count($path)
+
+# Stream a first-100-row preview without buffering the whole file.
+p "--- first 100 rows ---"
+my $n = 0
+Arrow::read_stream($path,
+    limit    => 100,
+    callback => sub ($row) {
+        $n++
+        p "$n: " . to_json($row)
+    },
+)

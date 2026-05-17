@@ -1,0 +1,40 @@
+# lib/JSON.stk — `use Arrow::JSON` (vectorized NDJSON reader/writer)
+
+package Arrow::JSON
+
+use Arrow
+
+fn Arrow::JSON::read ($path, %opts) {
+    $opts{format} = "json"
+    Arrow::_read_impl($path, \%opts)
+}
+
+fn Arrow::JSON::read_stream ($path, %opts) {
+    $opts{format} = "json"
+    Arrow::read_stream($path, %opts)
+}
+
+fn Arrow::JSON::read_columnar ($path, %opts) {
+    $opts{format} = "json"
+    Arrow::_read_columnar_impl($path, \%opts)
+}
+
+fn Arrow::JSON::write ($path, $rows, %opts) {
+    $opts{format} = "json"
+    Arrow::_write_impl($path, $rows, \%opts)
+}
+
+fn Arrow::JSON::write_iter ($path, $iter, %opts) {
+    $opts{format} = "json"
+    Arrow::write_iter($path, $iter, %opts)
+}
+
+fn Arrow::JSON::schema ($path) {
+    Arrow::_schema_impl($path, { format => "json" })
+}
+
+fn Arrow::JSON::stats ($path) {
+    Arrow::_stats_impl($path, { format => "json" })
+}
+
+1

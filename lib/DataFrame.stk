@@ -1,0 +1,49 @@
+# lib/DataFrame.stk — `use Arrow::DataFrame`
+#
+# Bridge between Arrow files and stryke's built-in `dataframe()` columnar
+# value. Falls back to a plain `{ col => [vals] }` hashref when this stryke
+# build doesn't expose `dataframe()`.
+
+package Arrow::DataFrame
+
+use Arrow
+
+fn Arrow::DataFrame::load ($path, %opts) {
+    my $cw = Arrow::_read_columnar_impl($path, \%opts)
+    Arrow::DataFrame::_columnar_to_df($cw)
+}
+
+fn Arrow::DataFrame::dump ($path, $df, %opts) {
+    my $rows = Arrow::DataFrame::_df_to_rows($df)
+    Arrow::_write_impl($path, $rows, \%opts)
+}
+
+fn Arrow::DataFrame::_columnar_to_df ($cw) {
+    my $cols = $cw->{columns}
+    defined &dataframe ? dataframe($cols) : $cols
+}
+
+fn Arrow::DataFrame::_df_to_rows ($df) {
+    my %cols
+    if (ref($df) eq "HASH") {
+        %cols = %$df
+    } elsif (defined &df_columns) {
+        %cols = %{ df_columns($df) }
+    } else {
+        die "Arrow::DataFrame::dump: unsupported frame type " . ref($df)
+    }
+    my @names = keys %cols
+    return [] if @names == 0
+    my $n = len @{ $cols{$names[0]} }
+    my @rows
+    for (my $i = 0; $i < $n; $i++) {
+        my %row
+        for my $name (@names) {
+            $row{$name} = $cols{$name}[$i]
+        }
+        push @rows, \%row
+    }
+    \@rows
+}
+
+1

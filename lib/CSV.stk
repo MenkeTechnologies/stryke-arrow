@@ -1,0 +1,40 @@
+# lib/CSV.stk — `use Arrow::CSV` (vectorized arrow-csv reader/writer)
+
+package Arrow::CSV
+
+use Arrow
+
+fn Arrow::CSV::read ($path, %opts) {
+    $opts{format} = "csv"
+    Arrow::_read_impl($path, \%opts)
+}
+
+fn Arrow::CSV::read_stream ($path, %opts) {
+    $opts{format} = "csv"
+    Arrow::read_stream($path, %opts)
+}
+
+fn Arrow::CSV::read_columnar ($path, %opts) {
+    $opts{format} = "csv"
+    Arrow::_read_columnar_impl($path, \%opts)
+}
+
+fn Arrow::CSV::write ($path, $rows, %opts) {
+    $opts{format} = "csv"
+    Arrow::_write_impl($path, $rows, \%opts)
+}
+
+fn Arrow::CSV::write_iter ($path, $iter, %opts) {
+    $opts{format} = "csv"
+    Arrow::write_iter($path, $iter, %opts)
+}
+
+fn Arrow::CSV::schema ($path) {
+    Arrow::_schema_impl($path, { format => "csv" })
+}
+
+fn Arrow::CSV::stats ($path) {
+    Arrow::_stats_impl($path, { format => "csv" })
+}
+
+1

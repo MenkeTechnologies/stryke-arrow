@@ -1,0 +1,6 @@
+/target
+Cargo.lock
+*.parquet
+*.arrow
+*.feather
+/tmp

@@ -1,0 +1,40 @@
+# lib/IPC.stk — `use Arrow::IPC` (Arrow IPC file format, aka Feather v2)
+
+package Arrow::IPC
+
+use Arrow
+
+fn Arrow::IPC::read ($path, %opts) {
+    $opts{format} = "ipc"
+    Arrow::_read_impl($path, \%opts)
+}
+
+fn Arrow::IPC::read_stream ($path, %opts) {
+    $opts{format} = "ipc"
+    Arrow::read_stream($path, %opts)
+}
+
+fn Arrow::IPC::read_columnar ($path, %opts) {
+    $opts{format} = "ipc"
+    Arrow::_read_columnar_impl($path, \%opts)
+}
+
+fn Arrow::IPC::write ($path, $rows, %opts) {
+    $opts{format} = "ipc"
+    Arrow::_write_impl($path, $rows, \%opts)
+}
+
+fn Arrow::IPC::write_iter ($path, $iter, %opts) {
+    $opts{format} = "ipc"
+    Arrow::write_iter($path, $iter, %opts)
+}
+
+fn Arrow::IPC::schema ($path) {
+    Arrow::_schema_impl($path, { format => "ipc" })
+}
+
+fn Arrow::IPC::stats ($path) {
+    Arrow::_stats_impl($path, { format => "ipc" })
+}
+
+1
