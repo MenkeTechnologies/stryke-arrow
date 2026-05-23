@@ -1,12 +1,46 @@
-# stryke-arrow
+```
+ ███████╗████████╗██████╗ ██╗   ██╗██╗  ██╗███████╗
+ ██╔════╝╚══██╔══╝██╔══██╗╚██╗ ██╔╝██║ ██╔╝██╔════╝
+ ███████╗   ██║   ██████╔╝ ╚████╔╝ █████╔╝ █████╗
+ ╚════██║   ██║   ██╔══██╗  ╚██╔╝  ██╔═██╗ ██╔══╝
+ ███████║   ██║   ██║  ██║   ██║   ██║  ██╗███████╗
+ ╚══════╝   ╚═╝   ╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚══════╝
+                   [ a r r o w ]
+```
 
-Apache Arrow + Parquet + Arrow IPC + Feather + arrow-CSV + arrow-JSON for
-stryke. Opt-in package, kept out of the stryke core binary so the daily-driver
-install stays slim.
+[![CI](https://github.com/MenkeTechnologies/stryke-arrow/actions/workflows/ci.yml/badge.svg)](https://github.com/MenkeTechnologies/stryke-arrow/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![stryke](https://img.shields.io/badge/stryke-package-cyan.svg)](https://github.com/MenkeTechnologies/strykelang)
 
-Created by MenkeTechnologies.
+### `[APACHE ARROW + PARQUET + FEATHER + ARROW-CSV/JSON // STRYKE PACKAGE]`
 
-## Why this is a package, not a builtin
+> *"Columnar data, on demand. No daily-driver weight."*
+
+Apache Arrow + Parquet + Arrow IPC + Feather + arrow-CSV + arrow-JSON for stryke. Opt-in package, kept out of the stryke core binary so the daily-driver install stays slim. Created by MenkeTechnologies.
+
+### [`strykelang`](https://github.com/MenkeTechnologies/strykelang) &middot; [`MenkeTechnologiesMeta`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta) · [`stryke-parquet`](https://github.com/MenkeTechnologies/stryke-parquet) · [`stryke-duckdb`](https://github.com/MenkeTechnologies/stryke-duckdb) · [`stryke-demo`](https://github.com/MenkeTechnologies/stryke-demo)
+
+---
+
+## Table of Contents
+
+- [\[0x00\] Why a Package, Not a Builtin](#0x00-why-a-package-not-a-builtin)
+- [\[0x01\] Install](#0x01-install)
+- [\[0x02\] Quick Start](#0x02-quick-start)
+- [\[0x03\] CLI: `arrow`](#0x03-cli-arrow)
+- [\[0x04\] API Reference](#0x04-api-reference)
+- [\[0x05\] Helper Protocol](#0x05-helper-protocol)
+- [\[0x06\] Supported Formats](#0x06-supported-formats)
+- [\[0x07\] Compression](#0x07-compression)
+- [\[0x08\] Discovery](#0x08-discovery)
+- [\[0x09\] Tests](#0x09-tests)
+- [\[0x0A\] Dev Workflow](#0x0a-dev-workflow)
+- [\[0x0B\] Layout](#0x0b-layout)
+- [\[0xFF\] License](#0xff-license)
+
+---
+
+## [0x00] Why a Package, Not a Builtin
 
 stryke's core stays small on purpose — most one-liner / awk-replacement work
 doesn't need 200 transitive crates of columnar data infrastructure. arrow-rs +
@@ -22,7 +56,7 @@ parquet hit a different scale:
 NDJSON-pipe wrapper; the heavy arrow-rs/parquet code lives in the helper and
 is loaded on demand. Core stryke is never linked against arrow.
 
-## Install
+## [0x01] Install
 
 ```sh
 cd ~/projects/stryke-arrow
@@ -41,7 +75,7 @@ After install, `arrow --help` works from anywhere on PATH (assuming
 project that depends on the package via `[deps] arrow = { path = "..." }`
 or, when published, by name.
 
-## Quick start
+## [0x02] Quick Start
 
 ```perl
 use Arrow
@@ -96,7 +130,7 @@ my $df = Arrow::DataFrame::load("sales.parquet")
 # { col => [vals] } columnar hash.
 ```
 
-## CLI: `arrow`
+## [0x03] CLI: `arrow`
 
 ```sh
 arrow read    sales.parquet --columns=id,amount --limit=10
@@ -109,7 +143,7 @@ arrow build                                  # build the helper via cargo
 arrow version
 ```
 
-## API reference
+## [0x04] API Reference
 
 ### `Arrow::read(PATH, %opts) → @rows | \@rows`
 Load every row as a hashref. Options: `format`, `columns` (array or comma
@@ -155,7 +189,7 @@ Builds the helper via `cargo build --release` if missing.
 ### `Arrow::version() → $string`
 Helper version string.
 
-## Helper protocol
+## [0x05] Helper Protocol
 
 The helper speaks NDJSON over stdin/stdout. Useful if you want to skip
 stryke entirely:
@@ -171,7 +205,7 @@ stryke-arrow-helper convert in.csv out.parquet --compression=zstd
 
 Format is detected from the file extension; pass `--format` to override.
 
-## Supported formats
+## [0x06] Supported Formats
 
 | Format | Read | Write | Notes |
 |---|---|---|---|
@@ -181,7 +215,7 @@ Format is detected from the file extension; pass `--format` to override.
 | CSV | ✓ | ✓ | header row mandatory; schema inferred from first 1024 rows |
 | JSON (NDJSON) | ✓ | ✓ | line-delimited only |
 
-## Compression
+## [0x07] Compression
 
 | Codec | Library | Notes |
 |---|---|---|
@@ -192,7 +226,7 @@ Format is detected from the file extension; pass `--format` to override.
 | `brotli` | `brotli` | high ratio, slow |
 | `uncompressed` | — | fastest write, biggest file |
 
-## Discovery
+## [0x08] Discovery
 
 The stryke library locates the helper in this order:
 
@@ -205,7 +239,7 @@ The stryke library locates the helper in this order:
 `<pkg>` is derived from `__FILE__` on the loaded `Arrow.stk`, so it works
 whether the package lives in your source tree or under `~/.stryke/store/`.
 
-## Tests
+## [0x09] Tests
 
 ```sh
 cargo test                       # helper unit tests (none yet, scaffold)
@@ -215,7 +249,7 @@ s test t/                        # end-to-end round-trip per format
 `t/test_arrow.stk` writes a small dataset in every format, reads it back,
 checks shape + values, and exits TAP-style.
 
-## Dev workflow
+## [0x0A] Dev Workflow
 
 ```sh
 make             # release build
@@ -225,7 +259,7 @@ make install     # release + pkg install -g .
 make clean
 ```
 
-## Layout
+## [0x0B] Layout
 
 ```
 stryke-arrow/
@@ -252,6 +286,6 @@ stryke-arrow/
     dataframe_bridge.stk
 ```
 
-## License
+## [0xFF] License
 
 MIT.
