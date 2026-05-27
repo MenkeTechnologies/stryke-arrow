@@ -1385,4 +1385,282 @@ mod tests {
         // Default nullable = true when omitted.
         assert!(s.field(1).is_nullable());
     }
+
+    #[test]
+    fn parse_compression_gzip_and_brotli() {
+        assert!(matches!(parse_compression("gzip").unwrap(), Compression::GZIP(_)));
+        assert!(matches!(parse_compression("brotli").unwrap(), Compression::BROTLI(_)));
+    }
+
+    #[test]
+    fn parse_compression_zstd_default_level() {
+        assert!(matches!(parse_compression("zstd").unwrap(), Compression::ZSTD(_)));
+        assert!(matches!(parse_compression("ZSTD").unwrap(), Compression::ZSTD(_)));
+    }
+
+    #[test]
+    fn parse_type_label_uint_and_float_aliases() {
+        assert_eq!(parse_type_label("uint64").unwrap(), DataType::UInt64);
+        assert_eq!(parse_type_label("float32").unwrap(), DataType::Float32);
+    }
+
+    #[test]
+    fn data_type_label_timestamp_includes_unit_and_tz() {
+        use arrow::datatypes::TimeUnit;
+        let dt = DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()));
+        let label = data_type_label(&dt);
+        assert!(label.contains("timestamp"));
+        assert!(label.contains("utc"));
+    }
+
+    #[test]
+    fn data_type_label_map_nests_value_type() {
+        let entries = Field::new(
+            "entries",
+            DataType::Struct(vec![
+                Field::new("key", DataType::Utf8, false),
+                Field::new("value", DataType::Utf8, true),
+            ].into()),
+            false,
+        );
+        let dt = DataType::Map(Arc::new(entries), false);
+        assert!(data_type_label(&dt).starts_with("map<"));
+    }
+
+    #[test]
+    fn column_indices_empty_projection_returns_empty() {
+        let s = Schema::new(vec![Field::new("a", DataType::Int32, false)]);
+        assert!(column_indices(&s, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn compare_values_bool_ordering() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_values(&json!(false), &json!(true)), Less);
+        assert_eq!(compare_values(&json!(true), &json!(true)), Equal);
+    }
+
+    #[test]
+    fn schema_to_json_includes_field_metadata() {
+        let mut meta = std::collections::HashMap::new();
+        meta.insert("PARQUET:field_id".into(), "7".into());
+        let f = Field::new("x", DataType::Int32, true).with_metadata(meta);
+        let s = Schema::new(vec![f]);
+        let j = schema_to_json(&s);
+        assert_eq!(j["fields"][0]["name"], json!("x"));
+        assert_eq!(j["fields"][0]["metadata"]["PARQUET:field_id"], json!("7"));
+    }
+
+    #[test]
+    fn parse_type_label_int8_uint64_and_null() {
+        assert_eq!(parse_type_label("int8").unwrap(), DataType::Int8);
+        assert_eq!(parse_type_label("uint64").unwrap(), DataType::UInt64);
+        assert_eq!(parse_type_label("null").unwrap(), DataType::Null);
+    }
+
+    #[test]
+    fn parse_type_label_large_binary_alias() {
+        assert_eq!(parse_type_label("large_binary").unwrap(), DataType::LargeBinary);
+    }
+
+    #[test]
+    fn field_to_json_carries_nullable_flag() {
+        let f = Field::new("n", DataType::Utf8, false);
+        let j = field_to_json(&f);
+        assert_eq!(j.name, "n");
+        assert_eq!(j.ty, "string");
+        assert!(!j.nullable);
+    }
+
+    #[test]
+    fn compare_values_string_lexicographic() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_values(&json!("apple"), &json!("banana")), Less);
+    }
+
+    #[test]
+    fn merge_min_max_integer_json_numbers() {
+        assert_eq!(merge_min(Some(json!(10)), json!(3)), json!(3));
+        assert_eq!(merge_max(Some(json!(10)), json!(3)), json!(10));
+    }
+
+    #[test]
+    fn fmt_detect_feather_extension() {
+        assert_eq!(Fmt::detect(Path::new("x.feather")).unwrap(), Fmt::Feather);
+    }
+
+    #[test]
+    fn load_user_schema_unknown_type_errors() {
+        let tmp =
+            std::env::temp_dir().join(format!("stryke-arrow-badtype-{}.json", std::process::id()));
+        std::fs::write(&tmp, r#"{"fields":[{"name":"x","type":"avro"}]}"#).unwrap();
+        let err = load_user_schema(&tmp).unwrap_err();
+        let _ = std::fs::remove_file(&tmp);
+        assert!(format!("{err}").contains("avro"));
+    }
+
+    #[test]
+    fn data_type_label_uint16_and_float16() {
+        assert_eq!(data_type_label(&DataType::UInt16), "uint16");
+        assert_eq!(data_type_label(&DataType::Float16), "float16");
+    }
+
+    #[test]
+    fn parse_type_label_date64_and_binary() {
+        assert_eq!(parse_type_label("date64").unwrap(), DataType::Date64);
+        assert_eq!(parse_type_label("binary").unwrap(), DataType::Binary);
+    }
+
+    #[test]
+    fn format_label_all_formats_distinct() {
+        let labels: Vec<_> = [Fmt::Parquet, Fmt::Ipc, Fmt::Feather, Fmt::Csv, Fmt::Json]
+            .iter()
+            .map(|f| format_label(*f))
+            .collect();
+        assert_eq!(labels.len(), 5);
+        assert!(labels.iter().all(|l| !l.is_empty()));
+    }
+
+    #[test]
+    fn column_indices_duplicate_column_name_uses_first() {
+        let s = Schema::new(vec![
+            Field::new("x", DataType::Int32, false),
+            Field::new("x", DataType::Utf8, true),
+        ]);
+        let got = column_indices(&s, &["x".into()]).unwrap();
+        assert_eq!(got, vec![0]);
+    }
+
+    #[test]
+    fn compare_values_i64_json_number() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_values(&json!(1), &json!(2i64)), Less);
+    }
+
+    #[test]
+    fn merge_max_string_picks_lex_larger() {
+        assert_eq!(merge_max(Some(json!("a")), json!("z")), json!("z"));
+    }
+
+    #[test]
+    fn parse_columns_tabs_between_names() {
+        let got = parse_columns(Some("a\t,\tb")).unwrap();
+        assert_eq!(got, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn data_type_label_large_list_nests() {
+        let inner = Field::new("item", DataType::Utf8, true);
+        let dt = DataType::LargeList(Arc::new(inner));
+        assert_eq!(data_type_label(&dt), "large_list<string>");
+    }
+
+    #[test]
+    fn load_user_schema_missing_name_field_errors() {
+        let tmp = std::env::temp_dir().join(format!("stryke-arrow-noname-{}.json", std::process::id()));
+        std::fs::write(&tmp, r#"{"fields":[{"type":"int"}]}"#).unwrap();
+        let err = load_user_schema(&tmp).unwrap_err();
+        let _ = std::fs::remove_file(&tmp);
+        assert!(format!("{err}").contains("name"));
+    }
+
+    #[test]
+    fn parse_type_label_large_utf8_alias() {
+        assert_eq!(parse_type_label("large_utf8").unwrap(), DataType::LargeUtf8);
+    }
+
+    #[test]
+    fn data_type_label_duration_includes_unit() {
+        use arrow::datatypes::TimeUnit;
+        let dt = DataType::Duration(TimeUnit::Millisecond);
+        let label = data_type_label(&dt);
+        assert!(label.contains("duration"));
+        assert!(label.contains("millisecond"));
+    }
+
+    #[test]
+    fn fmt_parse_arrow_file_alias() {
+        assert_eq!(Fmt::parse("arrow").unwrap(), Fmt::Ipc);
+    }
+
+    #[test]
+    fn load_user_schema_field_missing_type_errors() {
+        let tmp = std::env::temp_dir().join(format!("stryke-arrow-notype-{}.json", std::process::id()));
+        std::fs::write(&tmp, r#"{"fields":[{"name":"x"}]}"#).unwrap();
+        let err = load_user_schema(&tmp).unwrap_err();
+        let _ = std::fs::remove_file(&tmp);
+        assert!(format!("{err}").contains("type"));
+    }
+
+    #[test]
+    fn merge_max_none_takes_candidate() {
+        assert_eq!(merge_max(None, json!(99)), json!(99));
+    }
+
+    #[test]
+    fn compare_values_array_vs_number_equal() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_values(&json!([1]), &json!(1)), Equal);
+    }
+
+    #[test]
+    fn schema_to_json_fields_array_len() {
+        let s = Schema::new(vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("b", DataType::Utf8, true),
+        ]);
+        let j = schema_to_json(&s);
+        assert_eq!(j["fields"].as_array().unwrap().len(), 2);
+        assert_eq!(j["fields"][0]["name"], json!("a"));
+    }
+
+    #[test]
+    fn parse_compression_brotli_case_insensitive() {
+        assert!(matches!(parse_compression("Brotli").unwrap(), Compression::BROTLI(_)));
+    }
+
+    #[test]
+    fn parse_type_label_int16_and_uint8() {
+        assert_eq!(parse_type_label("int16").unwrap(), DataType::Int16);
+        assert_eq!(parse_type_label("uint8").unwrap(), DataType::UInt8);
+    }
+
+    #[test]
+    fn data_type_label_binary_and_large_binary() {
+        assert_eq!(data_type_label(&DataType::Binary), "binary");
+        assert_eq!(data_type_label(&DataType::LargeBinary), "large_binary");
+    }
+
+    #[test]
+    fn fmt_detect_jsonl_extension() {
+        assert_eq!(Fmt::detect(Path::new("events.jsonl")).unwrap(), Fmt::Json);
+    }
+
+    #[test]
+    fn merge_min_equal_candidates_unchanged() {
+        assert_eq!(merge_min(Some(json!(4)), json!(4)), json!(4));
+    }
+
+    #[test]
+    fn compare_values_negative_numbers() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_values(&json!(-10), &json!(-1)), Less);
+    }
+
+    #[test]
+    fn parse_columns_spaces_around_names_trimmed() {
+        assert_eq!(parse_columns(Some(" x , y ")).unwrap(), vec!["x", "y"]);
+    }
+
+    #[test]
+    fn field_to_json_nullable_true_flag() {
+        let f = Field::new("n", DataType::Utf8, true);
+        assert!(field_to_json(&f).nullable);
+    }
+
+    #[test]
+    fn fmt_from_override_or_path_unknown_override_still_wins() {
+        let f = Fmt::from_override_or_path(Some("csv"), Path::new("x.parquet")).unwrap();
+        assert_eq!(f, Fmt::Csv);
+    }
 }
