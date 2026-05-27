@@ -1709,4 +1709,56 @@ mod tests {
         let s = Schema::new(vec![Field::new("only", DataType::Utf8, true)]);
         assert_eq!(column_indices(&s, &["only".into()]).unwrap(), vec![0]);
     }
+
+    #[test]
+    fn data_type_label_uint16() {
+        assert_eq!(data_type_label(&DataType::UInt16), "uint16");
+    }
+
+    #[test]
+    fn parse_columns_three_names() {
+        assert_eq!(
+            parse_columns(Some("a,b,c")).unwrap(),
+            vec!["a", "b", "c"],
+        );
+    }
+
+    #[test]
+    fn merge_min_none_takes_candidate() {
+        assert_eq!(merge_min(None, json!(5)), json!(5));
+    }
+
+    #[test]
+    fn compare_values_number_less_than() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_values(&json!(1), &json!(9)), Less);
+    }
+
+    #[test]
+    fn fmt_parse_jsonl_alias() {
+        assert_eq!(Fmt::parse("jsonl").unwrap(), Fmt::Json);
+    }
+
+    #[test]
+    fn schema_to_json_num_fields_matches() {
+        let s = Schema::new(vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("b", DataType::Utf8, true),
+        ]);
+        assert_eq!(schema_to_json(&s)["fields"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn parse_compression_snappy_lowercase() {
+        assert!(matches!(parse_compression("snappy").unwrap(), Compression::SNAPPY));
+    }
+
+    #[test]
+    fn column_indices_preserves_order() {
+        let s = Schema::new(vec![
+            Field::new("x", DataType::Int32, false),
+            Field::new("y", DataType::Int32, false),
+        ]);
+        assert_eq!(column_indices(&s, &["y".into(), "x".into()]).unwrap(), vec![1, 0]);
+    }
 }
