@@ -1663,4 +1663,50 @@ mod tests {
         let f = Fmt::from_override_or_path(Some("csv"), Path::new("x.parquet")).unwrap();
         assert_eq!(f, Fmt::Csv);
     }
+
+    #[test]
+    fn parse_type_label_uint16_and_float16() {
+        assert_eq!(parse_type_label("uint16").unwrap(), DataType::UInt16);
+        assert_eq!(parse_type_label("float16").unwrap(), DataType::Float16);
+    }
+
+    #[test]
+    fn data_type_label_date32_and_date64() {
+        assert_eq!(data_type_label(&DataType::Date32), "date32");
+        assert_eq!(data_type_label(&DataType::Date64), "date64");
+    }
+
+    #[test]
+    fn fmt_parse_tsv_alias() {
+        assert_eq!(Fmt::parse("tsv").unwrap(), Fmt::Csv);
+    }
+
+    #[test]
+    fn merge_max_equal_keeps_value() {
+        assert_eq!(merge_max(Some(json!(7)), json!(7)), json!(7));
+    }
+
+    #[test]
+    fn compare_values_null_to_null_equal() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_values(&Value::Null, &Value::Null), Equal);
+    }
+
+    #[test]
+    fn schema_to_json_empty_metadata_object() {
+        let s = Schema::new(vec![Field::new("x", DataType::Int32, false)]);
+        let j = schema_to_json(&s);
+        assert!(j["metadata"].is_object());
+    }
+
+    #[test]
+    fn parse_compression_gzip_uppercase() {
+        assert!(matches!(parse_compression("GZIP").unwrap(), Compression::GZIP(_)));
+    }
+
+    #[test]
+    fn column_indices_single_column() {
+        let s = Schema::new(vec![Field::new("only", DataType::Utf8, true)]);
+        assert_eq!(column_indices(&s, &["only".into()]).unwrap(), vec![0]);
+    }
 }
