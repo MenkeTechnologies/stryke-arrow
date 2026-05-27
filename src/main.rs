@@ -1092,3 +1092,297 @@ fn cmd_convert(
     sink.finish()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── Fmt::parse / detect / from_override_or_path ─────────────────
+
+    #[test]
+    fn fmt_parse_accepts_all_known_aliases() {
+        assert_eq!(Fmt::parse("parquet").unwrap(), Fmt::Parquet);
+        assert_eq!(Fmt::parse("pq").unwrap(), Fmt::Parquet);
+        assert_eq!(Fmt::parse("ipc").unwrap(), Fmt::Ipc);
+        assert_eq!(Fmt::parse("arrow").unwrap(), Fmt::Ipc);
+        assert_eq!(Fmt::parse("feather").unwrap(), Fmt::Feather);
+        assert_eq!(Fmt::parse("csv").unwrap(), Fmt::Csv);
+        assert_eq!(Fmt::parse("tsv").unwrap(), Fmt::Csv);
+        assert_eq!(Fmt::parse("json").unwrap(), Fmt::Json);
+        assert_eq!(Fmt::parse("ndjson").unwrap(), Fmt::Json);
+        assert_eq!(Fmt::parse("jsonl").unwrap(), Fmt::Json);
+    }
+
+    #[test]
+    fn fmt_parse_is_case_insensitive() {
+        assert_eq!(Fmt::parse("PARQUET").unwrap(), Fmt::Parquet);
+        assert_eq!(Fmt::parse("Json").unwrap(), Fmt::Json);
+        assert_eq!(Fmt::parse("ARROW").unwrap(), Fmt::Ipc);
+    }
+
+    #[test]
+    fn fmt_parse_unknown_errors() {
+        let err = Fmt::parse("avro").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("unknown format"));
+        assert!(msg.contains("avro"));
+    }
+
+    #[test]
+    fn fmt_detect_uses_extension() {
+        assert_eq!(Fmt::detect(Path::new("/tmp/x.parquet")).unwrap(), Fmt::Parquet);
+        assert_eq!(Fmt::detect(Path::new("data.csv")).unwrap(), Fmt::Csv);
+        assert_eq!(Fmt::detect(Path::new("a.b.c.ndjson")).unwrap(), Fmt::Json);
+    }
+
+    #[test]
+    fn fmt_detect_no_extension_errors() {
+        let err = Fmt::detect(Path::new("/tmp/noext")).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("no extension"), "msg = {msg}");
+        assert!(msg.contains("--format"));
+    }
+
+    #[test]
+    fn fmt_from_override_or_path_prefers_override() {
+        // Path says csv but override says json — override wins.
+        let f = Fmt::from_override_or_path(Some("json"), Path::new("/tmp/x.csv")).unwrap();
+        assert_eq!(f, Fmt::Json);
+    }
+
+    #[test]
+    fn fmt_from_override_or_path_falls_back_to_path() {
+        let f = Fmt::from_override_or_path(None, Path::new("/tmp/x.parquet")).unwrap();
+        assert_eq!(f, Fmt::Parquet);
+    }
+
+    // ─── parse_columns ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_columns_none_passthrough() {
+        assert_eq!(parse_columns(None), None);
+    }
+
+    #[test]
+    fn parse_columns_splits_and_trims() {
+        let got = parse_columns(Some(" a , b,c ")).unwrap();
+        assert_eq!(got, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn parse_columns_filters_empty_segments() {
+        // Trailing comma, double comma, leading comma — all dropped.
+        let got = parse_columns(Some("a,,b,")).unwrap();
+        assert_eq!(got, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn parse_columns_empty_string_returns_empty_vec() {
+        // Distinct from None — caller passed --columns="", got Some([]).
+        let got = parse_columns(Some(""));
+        assert_eq!(got, Some(Vec::<String>::new()));
+    }
+
+    // ─── column_indices ──────────────────────────────────────────────
+
+    #[test]
+    fn column_indices_resolves_in_request_order() {
+        let s = Schema::new(vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("b", DataType::Utf8, true),
+            Field::new("c", DataType::Float64, false),
+        ]);
+        let got = column_indices(&s, &["c".into(), "a".into()]).unwrap();
+        assert_eq!(got, vec![2, 0]);
+    }
+
+    #[test]
+    fn column_indices_missing_column_errors_with_name() {
+        let s = Schema::new(vec![Field::new("a", DataType::Int32, false)]);
+        let err = column_indices(&s, &["nope".into()]).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("nope"), "msg = {msg}");
+    }
+
+    // ─── data_type_label ─────────────────────────────────────────────
+
+    #[test]
+    fn data_type_label_scalars_have_stable_lowercase_names() {
+        assert_eq!(data_type_label(&DataType::Boolean), "bool");
+        assert_eq!(data_type_label(&DataType::Int32), "int32");
+        assert_eq!(data_type_label(&DataType::Int64), "int64");
+        assert_eq!(data_type_label(&DataType::UInt8), "uint8");
+        assert_eq!(data_type_label(&DataType::Float64), "float64");
+        assert_eq!(data_type_label(&DataType::Utf8), "string");
+        assert_eq!(data_type_label(&DataType::LargeUtf8), "large_string");
+        assert_eq!(data_type_label(&DataType::Null), "null");
+    }
+
+    #[test]
+    fn data_type_label_decimal_has_precision_and_scale() {
+        assert_eq!(data_type_label(&DataType::Decimal128(20, 5)), "decimal128(20,5)");
+        assert_eq!(data_type_label(&DataType::Decimal256(40, 10)), "decimal256(40,10)");
+    }
+
+    #[test]
+    fn data_type_label_fixed_size_binary() {
+        assert_eq!(data_type_label(&DataType::FixedSizeBinary(16)), "fixed_size_binary(16)");
+    }
+
+    #[test]
+    fn data_type_label_list_nests_inner_type() {
+        let inner = Field::new("item", DataType::Int32, true);
+        let dt = DataType::List(Arc::new(inner));
+        assert_eq!(data_type_label(&dt), "list<int32>");
+    }
+
+    #[test]
+    fn data_type_label_struct_concatenates_fields() {
+        let dt = DataType::Struct(
+            vec![
+                Field::new("x", DataType::Int32, false),
+                Field::new("y", DataType::Utf8, true),
+            ]
+            .into(),
+        );
+        assert_eq!(data_type_label(&dt), "struct<x:int32,y:string>");
+    }
+
+    // ─── format_label ────────────────────────────────────────────────
+
+    #[test]
+    fn format_label_round_trips_via_parse() {
+        for f in [Fmt::Parquet, Fmt::Ipc, Fmt::Feather, Fmt::Csv, Fmt::Json] {
+            let label = format_label(f);
+            assert_eq!(Fmt::parse(label).unwrap(), f, "label = {label}");
+        }
+    }
+
+    // ─── parse_compression ───────────────────────────────────────────
+
+    #[test]
+    fn parse_compression_known_names() {
+        assert_eq!(parse_compression("snappy").unwrap(), Compression::SNAPPY);
+        assert_eq!(parse_compression("uncompressed").unwrap(), Compression::UNCOMPRESSED);
+        assert_eq!(parse_compression("none").unwrap(), Compression::UNCOMPRESSED);
+        assert_eq!(parse_compression("lz4_raw").unwrap(), Compression::LZ4_RAW);
+        assert_eq!(parse_compression("lz4").unwrap(), Compression::LZ4_RAW);
+    }
+
+    #[test]
+    fn parse_compression_case_insensitive() {
+        assert_eq!(parse_compression("SNAPPY").unwrap(), Compression::SNAPPY);
+        assert_eq!(parse_compression("Gzip").unwrap(), Compression::GZIP(Default::default()));
+    }
+
+    #[test]
+    fn parse_compression_unknown_errors() {
+        let err = parse_compression("bogus").unwrap_err();
+        assert!(format!("{err}").contains("unknown compression"));
+    }
+
+    // ─── parse_type_label ────────────────────────────────────────────
+
+    #[test]
+    fn parse_type_label_aliases() {
+        assert_eq!(parse_type_label("int").unwrap(), DataType::Int64);
+        assert_eq!(parse_type_label("int64").unwrap(), DataType::Int64);
+        assert_eq!(parse_type_label("float").unwrap(), DataType::Float32);
+        assert_eq!(parse_type_label("double").unwrap(), DataType::Float64);
+        assert_eq!(parse_type_label("str").unwrap(), DataType::Utf8);
+        assert_eq!(parse_type_label("utf8").unwrap(), DataType::Utf8);
+        assert_eq!(parse_type_label("string").unwrap(), DataType::Utf8);
+        assert_eq!(parse_type_label("bool").unwrap(), DataType::Boolean);
+        assert_eq!(parse_type_label("boolean").unwrap(), DataType::Boolean);
+        assert_eq!(parse_type_label("date").unwrap(), DataType::Date32);
+    }
+
+    #[test]
+    fn parse_type_label_unknown_errors_with_name() {
+        let err = parse_type_label("foobar").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("foobar"));
+    }
+
+    // ─── compare_values / merge_min / merge_max ──────────────────────
+
+    #[test]
+    fn compare_values_numbers_use_f64_ordering() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_values(&json!(1), &json!(2)), Less);
+        assert_eq!(compare_values(&json!(2.5), &json!(2.5)), Equal);
+        assert_eq!(compare_values(&json!(10), &json!(2)), Greater);
+    }
+
+    #[test]
+    fn compare_values_mixed_types_return_equal() {
+        // Defensive: differing JSON types fall through to Equal so the
+        // merge functions don't change state when receiving a mismatched
+        // candidate (e.g., a stringly-typed column hitting a numeric row).
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_values(&json!(1), &json!("a")), Equal);
+        assert_eq!(compare_values(&json!(true), &json!(1)), Equal);
+        assert_eq!(compare_values(&Value::Null, &json!(1)), Equal);
+    }
+
+    #[test]
+    fn merge_min_picks_smaller() {
+        assert_eq!(merge_min(None, json!(5)), json!(5));
+        assert_eq!(merge_min(Some(json!(10)), json!(5)), json!(5));
+        assert_eq!(merge_min(Some(json!(2)), json!(7)), json!(2));
+    }
+
+    #[test]
+    fn merge_max_picks_larger() {
+        assert_eq!(merge_max(None, json!(5)), json!(5));
+        assert_eq!(merge_max(Some(json!(10)), json!(5)), json!(10));
+        assert_eq!(merge_max(Some(json!(2)), json!(7)), json!(7));
+    }
+
+    #[test]
+    fn merge_min_strings_lex_order() {
+        assert_eq!(merge_min(Some(json!("banana")), json!("apple")), json!("apple"));
+        assert_eq!(merge_max(Some(json!("apple")), json!("banana")), json!("banana"));
+    }
+
+    // ─── load_user_schema (round-trip via on-disk JSON) ──────────────
+
+    #[test]
+    fn load_user_schema_missing_fields_array_errors() {
+        let tmp = std::env::temp_dir().join(format!("stryke-arrow-test-{}.json", std::process::id()));
+        std::fs::write(&tmp, r#"{"not_fields":[]}"#).unwrap();
+        let err = load_user_schema(&tmp).unwrap_err();
+        let _ = std::fs::remove_file(&tmp);
+        assert!(format!("{err}").contains("fields"));
+    }
+
+    #[test]
+    fn load_user_schema_field_without_name_errors() {
+        let tmp = std::env::temp_dir().join(format!("stryke-arrow-test-{}-noname.json", std::process::id()));
+        std::fs::write(&tmp, r#"{"fields":[{"type":"int"}]}"#).unwrap();
+        let err = load_user_schema(&tmp).unwrap_err();
+        let _ = std::fs::remove_file(&tmp);
+        assert!(format!("{err}").contains("name"));
+    }
+
+    #[test]
+    fn load_user_schema_happy_path_nullable_default_true() {
+        let tmp = std::env::temp_dir().join(format!("stryke-arrow-test-{}-ok.json", std::process::id()));
+        std::fs::write(
+            &tmp,
+            r#"{"fields":[
+              {"name":"id","type":"int64","nullable":false},
+              {"name":"name","type":"string"}
+            ]}"#,
+        )
+        .unwrap();
+        let s = load_user_schema(&tmp).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+        assert_eq!(s.fields().len(), 2);
+        assert_eq!(s.field(0).name(), "id");
+        assert_eq!(s.field(0).data_type(), &DataType::Int64);
+        assert!(!s.field(0).is_nullable());
+        // Default nullable = true when omitted.
+        assert!(s.field(1).is_nullable());
+    }
+}
