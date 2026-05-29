@@ -8,10 +8,10 @@
 //! * `read-columnar`  → single JSON object `{schema, columns}` to stdout.
 //! * `schema`         → single JSON object describing the file's schema.
 //! * `stats`          → single JSON object with row count + per-column stats
-//!                      (Parquet uses footer metadata; other formats scan).
+//!   (Parquet uses footer metadata; other formats scan).
 //! * `write`          → reads NDJSON from stdin, writes the requested format.
 //! * `convert`        → server-side conversion without round-tripping through
-//!                      the stryke process.
+//!   the stryke process.
 //!
 //! Format is auto-detected from the path extension; pass `--format` to override.
 
@@ -182,7 +182,14 @@ fn run() -> Result<()> {
             limit,
             skip,
             batch_size,
-        } => cmd_read(&path, format.as_deref(), columns.as_deref(), limit, skip, batch_size),
+        } => cmd_read(
+            &path,
+            format.as_deref(),
+            columns.as_deref(),
+            limit,
+            skip,
+            batch_size,
+        ),
         Cmd::ReadColumnar {
             path,
             format,
@@ -241,8 +248,8 @@ fn open_reader(
         Fmt::Parquet => {
             let file = File::open(path)
                 .with_context(|| format!("opening parquet file `{}`", path.display()))?;
-            let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)?
-                .with_batch_size(batch_size);
+            let mut builder =
+                ParquetRecordBatchReaderBuilder::try_new(file)?.with_batch_size(batch_size);
             if let Some(cols) = columns {
                 let parquet_schema = builder.parquet_schema();
                 let mask = parquet::arrow::ProjectionMask::columns(
@@ -269,8 +276,8 @@ fn open_reader(
         }
         Fmt::Csv => {
             // CSV needs schema inference. Open twice: once to infer, once to read.
-            let mut probe = File::open(path)
-                .with_context(|| format!("opening csv `{}`", path.display()))?;
+            let mut probe =
+                File::open(path).with_context(|| format!("opening csv `{}`", path.display()))?;
             let (inferred, _records_read) = CsvFormat::default()
                 .with_header(true)
                 .infer_schema(&mut probe, Some(1024))?;
@@ -291,10 +298,8 @@ fn open_reader(
             // builder-level projection, so when columns are requested we wrap
             // the inner reader in a projecting adapter.
             let mut probe = BufReader::new(File::open(path)?);
-            let (inferred, _) = arrow_json::reader::infer_json_schema_from_seekable(
-                &mut probe,
-                Some(1024),
-            )?;
+            let (inferred, _) =
+                arrow_json::reader::infer_json_schema_from_seekable(&mut probe, Some(1024))?;
             let schema = Arc::new(inferred);
             let file = BufReader::new(File::open(path)?);
             let inner = JsonReaderBuilder::new(schema.clone())
@@ -322,12 +327,13 @@ struct ProjectingReader {
 impl ProjectingReader {
     fn new(inner: Box<dyn RecordBatchReader + Send>, indices: Vec<usize>) -> Result<Self> {
         let src = inner.schema();
-        let fields: Vec<Field> = indices
-            .iter()
-            .map(|i| src.field(*i).clone())
-            .collect();
+        let fields: Vec<Field> = indices.iter().map(|i| src.field(*i).clone()).collect();
         let schema = Arc::new(Schema::new(fields));
-        Ok(Self { inner, indices, schema })
+        Ok(Self {
+            inner,
+            indices,
+            schema,
+        })
     }
 }
 
@@ -380,7 +386,7 @@ fn cmd_read(
 ) -> Result<()> {
     let fmt = Fmt::from_override_or_path(format, path)?;
     let cols = parse_columns(columns);
-    let mut reader = open_reader(path, fmt, cols.as_deref(), batch_size)?;
+    let reader = open_reader(path, fmt, cols.as_deref(), batch_size)?;
 
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
@@ -391,7 +397,7 @@ fn cmd_read(
 
     let mut emitted: usize = 0;
     let mut skipped: usize = 0;
-    while let Some(batch) = reader.next() {
+    for batch in reader {
         let batch = batch?;
         let n = batch.num_rows();
         let mut batch = batch;
@@ -403,7 +409,9 @@ fn cmd_read(
             }
             batch = batch.slice(to_skip, n - to_skip);
         }
-        let remaining = limit.map(|l| l.saturating_sub(emitted)).unwrap_or(usize::MAX);
+        let remaining = limit
+            .map(|l| l.saturating_sub(emitted))
+            .unwrap_or(usize::MAX);
         if remaining == 0 {
             break;
         }
@@ -433,14 +441,14 @@ fn cmd_read_columnar(
 ) -> Result<()> {
     let fmt = Fmt::from_override_or_path(format, path)?;
     let cols = parse_columns(columns);
-    let mut reader = open_reader(path, fmt, cols.as_deref(), 8192)?;
+    let reader = open_reader(path, fmt, cols.as_deref(), 8192)?;
     let schema = reader.schema();
 
     // Accumulate every batch up to `limit` rows, then convert each column to
     // a serde_json::Value array via arrow-json's row writer.
     let mut batches: Vec<RecordBatch> = Vec::new();
     let mut total: usize = 0;
-    while let Some(batch) = reader.next() {
+    for batch in reader {
         let mut batch = batch?;
         if let Some(l) = limit {
             let remaining = l.saturating_sub(total);
@@ -543,7 +551,8 @@ fn load_schema(path: &Path, fmt: Fmt) -> Result<SchemaRef> {
         }
         Fmt::Json => {
             let mut probe = BufReader::new(File::open(path)?);
-            let (s, _) = arrow_json::reader::infer_json_schema_from_seekable(&mut probe, Some(1024))?;
+            let (s, _) =
+                arrow_json::reader::infer_json_schema_from_seekable(&mut probe, Some(1024))?;
             Ok(Arc::new(s))
         }
     }
@@ -622,7 +631,9 @@ fn data_type_label(t: &DataType) -> String {
         DataType::Decimal256(p, s) => format!("decimal256({p},{s})"),
         DataType::List(f) => format!("list<{}>", data_type_label(f.data_type())),
         DataType::LargeList(f) => format!("large_list<{}>", data_type_label(f.data_type())),
-        DataType::FixedSizeList(f, n) => format!("fixed_size_list<{},{n}>", data_type_label(f.data_type())),
+        DataType::FixedSizeList(f, n) => {
+            format!("fixed_size_list<{},{n}>", data_type_label(f.data_type()))
+        }
         DataType::Struct(fields) => {
             let inner: Vec<String> = fields
                 .iter()
@@ -740,7 +751,10 @@ fn parquet_stats(path: &Path) -> Result<StatsOut> {
         }
     }
 
-    Ok(StatsOut { num_rows, columns: cols })
+    Ok(StatsOut {
+        num_rows,
+        columns: cols,
+    })
 }
 
 fn stats_null_count(s: &Statistics) -> u64 {
@@ -758,10 +772,12 @@ fn stats_min_value(s: &Statistics) -> Option<Value> {
         Statistics::Int64(v) => v.min_opt().map(|x| json!(x)),
         Statistics::Float(v) => v.min_opt().map(|x| json!(x)),
         Statistics::Double(v) => v.min_opt().map(|x| json!(x)),
-        Statistics::ByteArray(v) => v.min_opt().map(|x| json!(String::from_utf8_lossy(x.data()))),
-        Statistics::FixedLenByteArray(v) => {
-            v.min_opt().map(|x| json!(String::from_utf8_lossy(x.data())))
-        }
+        Statistics::ByteArray(v) => v
+            .min_opt()
+            .map(|x| json!(String::from_utf8_lossy(x.data()))),
+        Statistics::FixedLenByteArray(v) => v
+            .min_opt()
+            .map(|x| json!(String::from_utf8_lossy(x.data()))),
         Statistics::Int96(_) => None,
     }
 }
@@ -773,10 +789,12 @@ fn stats_max_value(s: &Statistics) -> Option<Value> {
         Statistics::Int64(v) => v.max_opt().map(|x| json!(x)),
         Statistics::Float(v) => v.max_opt().map(|x| json!(x)),
         Statistics::Double(v) => v.max_opt().map(|x| json!(x)),
-        Statistics::ByteArray(v) => v.max_opt().map(|x| json!(String::from_utf8_lossy(x.data()))),
-        Statistics::FixedLenByteArray(v) => {
-            v.max_opt().map(|x| json!(String::from_utf8_lossy(x.data())))
-        }
+        Statistics::ByteArray(v) => v
+            .max_opt()
+            .map(|x| json!(String::from_utf8_lossy(x.data()))),
+        Statistics::FixedLenByteArray(v) => v
+            .max_opt()
+            .map(|x| json!(String::from_utf8_lossy(x.data()))),
         Statistics::Int96(_) => None,
     }
 }
@@ -823,7 +841,7 @@ fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
 /// Fallback stats path: open the file as a RecordBatchReader, scan once to
 /// compute row count and per-column null counts. min/max left null.
 fn scan_stats(path: &Path, fmt: Fmt) -> Result<StatsOut> {
-    let mut reader = open_reader(path, fmt, None, 8192)?;
+    let reader = open_reader(path, fmt, None, 8192)?;
     let schema = reader.schema();
     let mut cols: Vec<ColStat> = schema
         .fields()
@@ -839,7 +857,7 @@ fn scan_stats(path: &Path, fmt: Fmt) -> Result<StatsOut> {
         })
         .collect();
     let mut num_rows: i64 = 0;
-    while let Some(batch) = reader.next() {
+    for batch in reader {
         let batch = batch?;
         num_rows += batch.num_rows() as i64;
         for (i, col) in batch.columns().iter().enumerate() {
@@ -849,7 +867,10 @@ fn scan_stats(path: &Path, fmt: Fmt) -> Result<StatsOut> {
             }
         }
     }
-    Ok(StatsOut { num_rows, columns: cols })
+    Ok(StatsOut {
+        num_rows,
+        columns: cols,
+    })
 }
 
 /* ------------------------------------------------------------------------- */
@@ -875,8 +896,7 @@ fn cmd_write(
         Arc::new(load_user_schema(p)?)
     } else {
         let mut probe = std::io::Cursor::new(&all_bytes);
-        let (inferred, _) =
-            arrow_json::reader::infer_json_schema_from_seekable(&mut probe, None)?;
+        let (inferred, _) = arrow_json::reader::infer_json_schema_from_seekable(&mut probe, None)?;
         Arc::new(inferred)
     };
 
@@ -889,7 +909,8 @@ fn cmd_write(
     decoder.decode(&all_bytes)?;
     drop(all_bytes);
 
-    let mut sink: Box<dyn BatchSink> = open_writer(path, fmt, schema.clone(), compression, row_group)?;
+    let mut sink: Box<dyn BatchSink> =
+        open_writer(path, fmt, schema.clone(), compression, row_group)?;
     while let Some(batch) = decoder.flush()? {
         sink.write(&batch)?;
     }
@@ -974,19 +995,25 @@ fn open_writer(
                 .set_max_row_group_row_count(Some(row_group))
                 .build();
             let writer = ArrowWriter::try_new(file, schema, Some(props))?;
-            Ok(Box::new(ParquetSink { writer: Some(writer) }))
+            Ok(Box::new(ParquetSink {
+                writer: Some(writer),
+            }))
         }
         Fmt::Ipc | Fmt::Feather => {
             let file = File::create(path)?;
             let writer = IpcFileWriter::try_new(BufWriter::new(file), &schema)?;
-            Ok(Box::new(IpcSink { writer: Some(writer) }))
+            Ok(Box::new(IpcSink {
+                writer: Some(writer),
+            }))
         }
         Fmt::Csv => {
             let file = File::create(path)?;
             let writer = CsvWriterBuilder::new()
                 .with_header(true)
                 .build(BufWriter::new(file));
-            Ok(Box::new(CsvSink { writer: Some(writer) }))
+            Ok(Box::new(CsvSink {
+                writer: Some(writer),
+            }))
         }
         Fmt::Json => {
             let file = File::create(path)?;
@@ -994,7 +1021,9 @@ fn open_writer(
             let writer = JsonWriterBuilder::new()
                 .with_explicit_nulls(true)
                 .build::<_, LineDelimited>(inner);
-            Ok(Box::new(JsonSink { writer: Some(writer) }))
+            Ok(Box::new(JsonSink {
+                writer: Some(writer),
+            }))
         }
     }
 }
@@ -1082,10 +1111,10 @@ fn cmd_convert(
 ) -> Result<()> {
     let src_fmt = Fmt::from_override_or_path(src_format, src)?;
     let dst_fmt = Fmt::from_override_or_path(dst_format, dst)?;
-    let mut reader = open_reader(src, src_fmt, None, 8192)?;
+    let reader = open_reader(src, src_fmt, None, 8192)?;
     let schema = reader.schema();
     let mut sink = open_writer(dst, dst_fmt, schema, compression, row_group)?;
-    while let Some(batch) = reader.next() {
+    for batch in reader {
         let batch = batch?;
         sink.write(&batch)?;
     }
@@ -1130,7 +1159,10 @@ mod tests {
 
     #[test]
     fn fmt_detect_uses_extension() {
-        assert_eq!(Fmt::detect(Path::new("/tmp/x.parquet")).unwrap(), Fmt::Parquet);
+        assert_eq!(
+            Fmt::detect(Path::new("/tmp/x.parquet")).unwrap(),
+            Fmt::Parquet
+        );
         assert_eq!(Fmt::detect(Path::new("data.csv")).unwrap(), Fmt::Csv);
         assert_eq!(Fmt::detect(Path::new("a.b.c.ndjson")).unwrap(), Fmt::Json);
     }
@@ -1220,13 +1252,22 @@ mod tests {
 
     #[test]
     fn data_type_label_decimal_has_precision_and_scale() {
-        assert_eq!(data_type_label(&DataType::Decimal128(20, 5)), "decimal128(20,5)");
-        assert_eq!(data_type_label(&DataType::Decimal256(40, 10)), "decimal256(40,10)");
+        assert_eq!(
+            data_type_label(&DataType::Decimal128(20, 5)),
+            "decimal128(20,5)"
+        );
+        assert_eq!(
+            data_type_label(&DataType::Decimal256(40, 10)),
+            "decimal256(40,10)"
+        );
     }
 
     #[test]
     fn data_type_label_fixed_size_binary() {
-        assert_eq!(data_type_label(&DataType::FixedSizeBinary(16)), "fixed_size_binary(16)");
+        assert_eq!(
+            data_type_label(&DataType::FixedSizeBinary(16)),
+            "fixed_size_binary(16)"
+        );
     }
 
     #[test]
@@ -1263,8 +1304,14 @@ mod tests {
     #[test]
     fn parse_compression_known_names() {
         assert_eq!(parse_compression("snappy").unwrap(), Compression::SNAPPY);
-        assert_eq!(parse_compression("uncompressed").unwrap(), Compression::UNCOMPRESSED);
-        assert_eq!(parse_compression("none").unwrap(), Compression::UNCOMPRESSED);
+        assert_eq!(
+            parse_compression("uncompressed").unwrap(),
+            Compression::UNCOMPRESSED
+        );
+        assert_eq!(
+            parse_compression("none").unwrap(),
+            Compression::UNCOMPRESSED
+        );
         assert_eq!(parse_compression("lz4_raw").unwrap(), Compression::LZ4_RAW);
         assert_eq!(parse_compression("lz4").unwrap(), Compression::LZ4_RAW);
     }
@@ -1272,7 +1319,10 @@ mod tests {
     #[test]
     fn parse_compression_case_insensitive() {
         assert_eq!(parse_compression("SNAPPY").unwrap(), Compression::SNAPPY);
-        assert_eq!(parse_compression("Gzip").unwrap(), Compression::GZIP(Default::default()));
+        assert_eq!(
+            parse_compression("Gzip").unwrap(),
+            Compression::GZIP(Default::default())
+        );
     }
 
     #[test]
@@ -1341,15 +1391,22 @@ mod tests {
 
     #[test]
     fn merge_min_strings_lex_order() {
-        assert_eq!(merge_min(Some(json!("banana")), json!("apple")), json!("apple"));
-        assert_eq!(merge_max(Some(json!("apple")), json!("banana")), json!("banana"));
+        assert_eq!(
+            merge_min(Some(json!("banana")), json!("apple")),
+            json!("apple")
+        );
+        assert_eq!(
+            merge_max(Some(json!("apple")), json!("banana")),
+            json!("banana")
+        );
     }
 
     // ─── load_user_schema (round-trip via on-disk JSON) ──────────────
 
     #[test]
     fn load_user_schema_missing_fields_array_errors() {
-        let tmp = std::env::temp_dir().join(format!("stryke-arrow-test-{}.json", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("stryke-arrow-test-{}.json", std::process::id()));
         std::fs::write(&tmp, r#"{"not_fields":[]}"#).unwrap();
         let err = load_user_schema(&tmp).unwrap_err();
         let _ = std::fs::remove_file(&tmp);
@@ -1358,7 +1415,10 @@ mod tests {
 
     #[test]
     fn load_user_schema_field_without_name_errors() {
-        let tmp = std::env::temp_dir().join(format!("stryke-arrow-test-{}-noname.json", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!(
+            "stryke-arrow-test-{}-noname.json",
+            std::process::id()
+        ));
         std::fs::write(&tmp, r#"{"fields":[{"type":"int"}]}"#).unwrap();
         let err = load_user_schema(&tmp).unwrap_err();
         let _ = std::fs::remove_file(&tmp);
@@ -1367,7 +1427,8 @@ mod tests {
 
     #[test]
     fn load_user_schema_happy_path_nullable_default_true() {
-        let tmp = std::env::temp_dir().join(format!("stryke-arrow-test-{}-ok.json", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("stryke-arrow-test-{}-ok.json", std::process::id()));
         std::fs::write(
             &tmp,
             r#"{"fields":[
@@ -1388,14 +1449,26 @@ mod tests {
 
     #[test]
     fn parse_compression_gzip_and_brotli() {
-        assert!(matches!(parse_compression("gzip").unwrap(), Compression::GZIP(_)));
-        assert!(matches!(parse_compression("brotli").unwrap(), Compression::BROTLI(_)));
+        assert!(matches!(
+            parse_compression("gzip").unwrap(),
+            Compression::GZIP(_)
+        ));
+        assert!(matches!(
+            parse_compression("brotli").unwrap(),
+            Compression::BROTLI(_)
+        ));
     }
 
     #[test]
     fn parse_compression_zstd_default_level() {
-        assert!(matches!(parse_compression("zstd").unwrap(), Compression::ZSTD(_)));
-        assert!(matches!(parse_compression("ZSTD").unwrap(), Compression::ZSTD(_)));
+        assert!(matches!(
+            parse_compression("zstd").unwrap(),
+            Compression::ZSTD(_)
+        ));
+        assert!(matches!(
+            parse_compression("ZSTD").unwrap(),
+            Compression::ZSTD(_)
+        ));
     }
 
     #[test]
@@ -1417,10 +1490,13 @@ mod tests {
     fn data_type_label_map_nests_value_type() {
         let entries = Field::new(
             "entries",
-            DataType::Struct(vec![
-                Field::new("key", DataType::Utf8, false),
-                Field::new("value", DataType::Utf8, true),
-            ].into()),
+            DataType::Struct(
+                vec![
+                    Field::new("key", DataType::Utf8, false),
+                    Field::new("value", DataType::Utf8, true),
+                ]
+                .into(),
+            ),
             false,
         );
         let dt = DataType::Map(Arc::new(entries), false);
@@ -1460,7 +1536,10 @@ mod tests {
 
     #[test]
     fn parse_type_label_large_binary_alias() {
-        assert_eq!(parse_type_label("large_binary").unwrap(), DataType::LargeBinary);
+        assert_eq!(
+            parse_type_label("large_binary").unwrap(),
+            DataType::LargeBinary
+        );
     }
 
     #[test]
@@ -1557,7 +1636,8 @@ mod tests {
 
     #[test]
     fn load_user_schema_missing_name_field_errors() {
-        let tmp = std::env::temp_dir().join(format!("stryke-arrow-noname-{}.json", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("stryke-arrow-noname-{}.json", std::process::id()));
         std::fs::write(&tmp, r#"{"fields":[{"type":"int"}]}"#).unwrap();
         let err = load_user_schema(&tmp).unwrap_err();
         let _ = std::fs::remove_file(&tmp);
@@ -1585,7 +1665,8 @@ mod tests {
 
     #[test]
     fn load_user_schema_field_missing_type_errors() {
-        let tmp = std::env::temp_dir().join(format!("stryke-arrow-notype-{}.json", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("stryke-arrow-notype-{}.json", std::process::id()));
         std::fs::write(&tmp, r#"{"fields":[{"name":"x"}]}"#).unwrap();
         let err = load_user_schema(&tmp).unwrap_err();
         let _ = std::fs::remove_file(&tmp);
@@ -1616,7 +1697,10 @@ mod tests {
 
     #[test]
     fn parse_compression_brotli_case_insensitive() {
-        assert!(matches!(parse_compression("Brotli").unwrap(), Compression::BROTLI(_)));
+        assert!(matches!(
+            parse_compression("Brotli").unwrap(),
+            Compression::BROTLI(_)
+        ));
     }
 
     #[test]
@@ -1701,7 +1785,10 @@ mod tests {
 
     #[test]
     fn parse_compression_gzip_uppercase() {
-        assert!(matches!(parse_compression("GZIP").unwrap(), Compression::GZIP(_)));
+        assert!(matches!(
+            parse_compression("GZIP").unwrap(),
+            Compression::GZIP(_)
+        ));
     }
 
     #[test]
@@ -1717,10 +1804,7 @@ mod tests {
 
     #[test]
     fn parse_columns_three_names() {
-        assert_eq!(
-            parse_columns(Some("a,b,c")).unwrap(),
-            vec!["a", "b", "c"],
-        );
+        assert_eq!(parse_columns(Some("a,b,c")).unwrap(), vec!["a", "b", "c"],);
     }
 
     #[test]
@@ -1750,7 +1834,10 @@ mod tests {
 
     #[test]
     fn parse_compression_snappy_lowercase() {
-        assert!(matches!(parse_compression("snappy").unwrap(), Compression::SNAPPY));
+        assert!(matches!(
+            parse_compression("snappy").unwrap(),
+            Compression::SNAPPY
+        ));
     }
 
     #[test]
@@ -1759,6 +1846,9 @@ mod tests {
             Field::new("x", DataType::Int32, false),
             Field::new("y", DataType::Int32, false),
         ]);
-        assert_eq!(column_indices(&s, &["y".into(), "x".into()]).unwrap(), vec![1, 0]);
+        assert_eq!(
+            column_indices(&s, &["y".into(), "x".into()]).unwrap(),
+            vec![1, 0]
+        );
     }
 }
