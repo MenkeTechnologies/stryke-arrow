@@ -1982,4 +1982,113 @@ mod tests {
         assert_missing_required(parse_cli(&["convert"]));
         assert_missing_required(parse_cli(&["convert", "/tmp/a.csv"]));
     }
+
+    // ─── clap parsing — additional subcommands + flag plumbing ──────────
+    // Previous round pinned read/write/convert defaults + required-positional
+    // on read/convert. These pin: (a) optional flags on Read actually thread
+    // through to the matched fields (not just accepted by clap and silently
+    // dropped), and (b) the read-columnar/schema/stats subcommands route
+    // correctly and enforce their path positional.
+
+    #[test]
+    fn cli_read_columns_flag_threads_through() {
+        // Pin: --columns="a,b" lands in Cmd::Read.columns as Some("a,b").
+        // parse_columns() is unit-tested separately; this pins the wiring.
+        let cli = unwrap_cli(parse_cli(&[
+            "read",
+            "/tmp/a.parquet",
+            "--columns",
+            "id,name",
+            "--limit",
+            "100",
+            "--skip",
+            "5",
+        ]));
+        match cli.cmd {
+            Cmd::Read {
+                columns,
+                limit,
+                skip,
+                ..
+            } => {
+                assert_eq!(columns.as_deref(), Some("id,name"));
+                assert_eq!(limit, Some(100));
+                assert_eq!(skip, 5);
+            }
+            _ => panic!("expected Read"),
+        }
+    }
+
+    #[test]
+    fn cli_read_columnar_routes_with_required_path() {
+        // Pin: `read-columnar` (note the kebab) is reachable as a subcommand.
+        let cli = unwrap_cli(parse_cli(&["read-columnar", "/tmp/a.parquet"]));
+        match cli.cmd {
+            Cmd::ReadColumnar { path, .. } => {
+                assert_eq!(path, std::path::PathBuf::from("/tmp/a.parquet"));
+            }
+            _ => panic!("expected ReadColumnar"),
+        }
+        assert_missing_required(parse_cli(&["read-columnar"]));
+    }
+
+    #[test]
+    fn cli_schema_routes_with_format_override() {
+        // Pin: schema subcommand carries --format override into the matched
+        // field for downstream Fmt::from_override_or_path dispatch.
+        let cli = unwrap_cli(parse_cli(&["schema", "/tmp/x.bin", "--format", "parquet"]));
+        match cli.cmd {
+            Cmd::Schema { path, format } => {
+                assert_eq!(path, std::path::PathBuf::from("/tmp/x.bin"));
+                assert_eq!(format.as_deref(), Some("parquet"));
+            }
+            _ => panic!("expected Schema"),
+        }
+        assert_missing_required(parse_cli(&["schema"]));
+    }
+
+    #[test]
+    fn cli_stats_routes_with_required_path() {
+        // Pin: stats subcommand routes + path is required (same shape as
+        // schema). Both consume footer metadata on Parquet, scan elsewhere.
+        let cli = unwrap_cli(parse_cli(&["stats", "/tmp/a.parquet"]));
+        match cli.cmd {
+            Cmd::Stats { path, format } => {
+                assert_eq!(path, std::path::PathBuf::from("/tmp/a.parquet"));
+                assert_eq!(format, None);
+            }
+            _ => panic!("expected Stats"),
+        }
+        assert_missing_required(parse_cli(&["stats"]));
+    }
+
+    #[test]
+    fn cli_write_schema_and_format_flags_thread_through() {
+        // Pin: --schema spec path + --format override on Write land in the
+        // matched fields. Drift here would silently disable user-supplied
+        // schemas (forcing inference) or format overrides on .bin paths.
+        let cli = unwrap_cli(parse_cli(&[
+            "write",
+            "/tmp/out.bin",
+            "--format",
+            "parquet",
+            "--schema",
+            "/tmp/schema.json",
+            "--compression",
+            "zstd",
+        ]));
+        match cli.cmd {
+            Cmd::Write {
+                format,
+                schema,
+                compression,
+                ..
+            } => {
+                assert_eq!(format.as_deref(), Some("parquet"));
+                assert_eq!(schema, Some(std::path::PathBuf::from("/tmp/schema.json")));
+                assert_eq!(compression, "zstd");
+            }
+            _ => panic!("expected Write"),
+        }
+    }
 }
