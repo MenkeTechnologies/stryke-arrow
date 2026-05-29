@@ -1886,4 +1886,100 @@ mod tests {
             );
         }
     }
+
+    // ─── clap parsing — Cli top-level + Cmd routing ─────────────────────
+    // The pure-function surface above pins parsers/labels comprehensively.
+    // These pin the user-facing CLI defaults: --batch-size on read,
+    // --skip default, --row-group on write, --compression on write,
+    // --infer-bytes inference budget. Drift would silently change memory
+    // pressure or compression on every helper invocation.
+
+    fn parse_cli(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut argv = vec!["stryke-arrow-helper"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv)
+    }
+
+    /// Cli lacks Debug; pull successes through a match helper.
+    fn unwrap_cli(res: Result<Cli, clap::Error>) -> Cli {
+        match res {
+            Ok(c) => c,
+            Err(e) => panic!("expected parse Ok, got Err: {e}"),
+        }
+    }
+
+    fn assert_missing_required(res: Result<Cli, clap::Error>) {
+        match res {
+            Err(e) => assert_eq!(e.kind(), clap::error::ErrorKind::MissingRequiredArgument),
+            Ok(_) => panic!("expected MissingRequiredArgument, got Ok"),
+        }
+    }
+
+    #[test]
+    fn cli_read_defaults_skip_zero_batch_8192() {
+        // Pin: 8192 = Arrow's default batch size; skip=0 = start at
+        // row 0. Drift in batch_size affects memory pressure on every
+        // read; drift in skip silently skips initial rows.
+        let cli = unwrap_cli(parse_cli(&["read", "/tmp/a.parquet"]));
+        match cli.cmd {
+            Cmd::Read {
+                skip, batch_size, ..
+            } => {
+                assert_eq!(skip, 0);
+                assert_eq!(batch_size, 8192);
+            }
+            _ => panic!("expected Read"),
+        }
+    }
+
+    #[test]
+    fn cli_write_defaults_snappy_row_group_65536_and_infer_1mb() {
+        // Pin: snappy = parquet ecosystem default. row_group=65536 is
+        // arrow-rs's standard. infer_bytes=1<<20 (1 MiB) is the schema
+        // inference budget; drift would change inference accuracy.
+        let cli = unwrap_cli(parse_cli(&["write", "/tmp/out.parquet"]));
+        match cli.cmd {
+            Cmd::Write {
+                compression,
+                row_group,
+                infer_bytes,
+                ..
+            } => {
+                assert_eq!(compression, "snappy");
+                assert_eq!(row_group, 65536);
+                assert_eq!(infer_bytes, 1 << 20);
+            }
+            _ => panic!("expected Write"),
+        }
+    }
+
+    #[test]
+    fn cli_convert_defaults_compression_and_row_group_match_write() {
+        // Pin: convert mirrors write's compression/row_group defaults
+        // for round-trip predictability. Drift would silently change
+        // file size when callers omit those flags on `convert`.
+        let cli = unwrap_cli(parse_cli(&["convert", "/tmp/a.csv", "/tmp/b.parquet"]));
+        match cli.cmd {
+            Cmd::Convert {
+                compression,
+                row_group,
+                ..
+            } => {
+                assert_eq!(compression, "snappy");
+                assert_eq!(row_group, 65536);
+            }
+            _ => panic!("expected Convert"),
+        }
+    }
+
+    #[test]
+    fn cli_read_requires_path_positional() {
+        assert_missing_required(parse_cli(&["read"]));
+    }
+
+    #[test]
+    fn cli_convert_requires_src_and_dst_positionals() {
+        assert_missing_required(parse_cli(&["convert"]));
+        assert_missing_required(parse_cli(&["convert", "/tmp/a.csv"]));
+    }
 }
