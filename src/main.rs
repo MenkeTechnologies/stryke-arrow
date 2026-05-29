@@ -1851,4 +1851,39 @@ mod tests {
             vec![1, 0]
         );
     }
+
+    // ─── Round-trip parity: parse → emit → parse ─────────────────────
+    //
+    // Every alias the parser accepts must round-trip through any of its
+    // own canonical spellings. Drift between the alias set and the
+    // detector / writer would make `parse("arrow")` legal while
+    // `detect("foo.arrow")` rejects it, which silently breaks the
+    // override-vs-extension contract surfaced via `--format`.
+
+    #[test]
+    fn every_parse_alias_round_trips_via_extension_detect() {
+        // Pair each non-canonical alias with an extension that should
+        // resolve to the same variant. If a new alias is added without
+        // a matching extension binding, this trips.
+        for (alias, ext_path) in [
+            ("parquet", "/tmp/x.parquet"),
+            ("pq", "/tmp/x.pq"),
+            ("ipc", "/tmp/x.ipc"),
+            ("arrow", "/tmp/x.arrow"),
+            ("feather", "/tmp/x.feather"),
+            ("csv", "/tmp/x.csv"),
+            ("tsv", "/tmp/x.tsv"),
+            ("json", "/tmp/x.json"),
+            ("ndjson", "/tmp/x.ndjson"),
+            ("jsonl", "/tmp/x.jsonl"),
+        ] {
+            let from_alias = Fmt::parse(alias).unwrap_or_else(|_| panic!("alias `{alias}`"));
+            let from_ext = Fmt::detect(Path::new(ext_path))
+                .unwrap_or_else(|_| panic!("ext path `{ext_path}`"));
+            assert_eq!(
+                from_alias, from_ext,
+                "alias `{alias}` and extension on `{ext_path}` resolved to different Fmt variants"
+            );
+        }
+    }
 }
