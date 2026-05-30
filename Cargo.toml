@@ -2,7 +2,7 @@
 name = "stryke-arrow-helper"
 version = "0.1.1"
 edition = "2021"
-description = "Apache Arrow / Parquet / IPC / CSV / JSON bridge binary for the stryke `arrow` package."
+description = "Apache Arrow / Parquet / IPC / CSV / JSON bridge binary for the stryke `arrow` package"
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-arrow"
