@@ -242,7 +242,7 @@ whether the package lives in your source tree or under `~/.stryke/store/`.
 ## [0x09] Tests
 
 ```sh
-cargo test                       # helper unit tests (none yet, scaffold)
+cargo test                       # helper CLI contract tests (tests/)
 s test t/                        # end-to-end round-trip per format
 ```
 
@@ -275,9 +275,6 @@ stryke-arrow/
     CSV.stk                    # `use Arrow::CSV`
     JSON.stk                   # `use Arrow::JSON`
     DataFrame.stk              # `use Arrow::DataFrame`
-  bin/
-    arrow.stk                  # `arrow` CLI
-    arrow-build.stk            # `arrow-build` CLI (cargo build wrapper)
   t/
     test_arrow.stk             # round-trip tests per format
   examples/
