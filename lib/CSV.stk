@@ -44,4 +44,3 @@ fn Arrow::CSV::stats ($path) {
     Arrow::_stats_impl($path, { format => "csv" })
 }
 
-1

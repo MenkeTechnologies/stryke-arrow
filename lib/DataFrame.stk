@@ -50,4 +50,3 @@ fn Arrow::DataFrame::_df_to_rows ($df) {
     \@rows
 }
 
-1

@@ -44,4 +44,3 @@ fn Arrow::IPC::stats ($path) {
     Arrow::_stats_impl($path, { format => "ipc" })
 }
 
-1

@@ -44,4 +44,3 @@ fn Arrow::Feather::stats ($path) {
     Arrow::_stats_impl($path, { format => "feather" })
 }
 
-1

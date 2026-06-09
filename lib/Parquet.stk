@@ -58,4 +58,3 @@ fn Arrow::Parquet::row_count ($path) {
     Arrow::_stats_impl($path, { format => "parquet" })->{num_rows}
 }
 
-1

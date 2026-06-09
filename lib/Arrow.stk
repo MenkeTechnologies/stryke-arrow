@@ -157,4 +157,3 @@ fn Arrow::convert ($src, $dst, %opts) {
     Arrow::_decode("convert", arrow__convert(to_json(\%req)))
 }
 
-1
