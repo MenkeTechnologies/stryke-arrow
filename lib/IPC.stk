@@ -4,35 +4,42 @@ package Arrow::IPC
 
 use Arrow
 
+## Read $path as Arrow IPC rows.
 fn Arrow::IPC::read ($path, %opts) {
     $opts{format} = "ipc"
     Arrow::_read_impl($path, \%opts)
 }
 
+## Stream Arrow IPC rows: callback per row; returns count.
 fn Arrow::IPC::read_stream ($path, %opts) {
     $opts{format} = "ipc"
     Arrow::read_stream($path, %opts)
 }
 
+## Read Arrow IPC in columnar shape.
 fn Arrow::IPC::read_columnar ($path, %opts) {
     $opts{format} = "ipc"
     Arrow::_read_columnar_impl($path, \%opts)
 }
 
+## Write $rows to Arrow IPC at $path.
 fn Arrow::IPC::write ($path, $rows, %opts) {
     $opts{format} = "ipc"
     Arrow::_write_impl($path, $rows, \%opts)
 }
 
+## Write rows produced by $iter coderef to Arrow IPC.
 fn Arrow::IPC::write_iter ($path, $iter, %opts) {
     $opts{format} = "ipc"
     Arrow::write_iter($path, $iter, %opts)
 }
 
+## Arrow IPC schema.
 fn Arrow::IPC::schema ($path) {
     Arrow::_schema_impl($path, { format => "ipc" })
 }
 
+## Arrow IPC stats.
 fn Arrow::IPC::stats ($path) {
     Arrow::_stats_impl($path, { format => "ipc" })
 }

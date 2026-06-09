@@ -11,41 +11,49 @@ package Arrow::Parquet
 
 use Arrow
 
+## Read $path as parquet rows. Same as Arrow::read but pins format.
 fn Arrow::Parquet::read ($path, %opts) {
     $opts{format} = "parquet"
     Arrow::_read_impl($path, \%opts)
 }
 
+## Stream parquet rows: callback per row; returns count.
 fn Arrow::Parquet::read_stream ($path, %opts) {
     $opts{format} = "parquet"
     Arrow::read_stream($path, %opts)
 }
 
+## Read parquet in columnar shape: { columns, num_rows, data }.
 fn Arrow::Parquet::read_columnar ($path, %opts) {
     $opts{format} = "parquet"
     Arrow::_read_columnar_impl($path, \%opts)
 }
 
+## Write $rows to parquet at $path. Default compression=snappy.
 fn Arrow::Parquet::write ($path, $rows, %opts) {
     $opts{format} = "parquet"
     $opts{compression} //= "snappy"
     Arrow::_write_impl($path, $rows, \%opts)
 }
 
+## Write rows produced by $iter coderef to parquet.
 fn Arrow::Parquet::write_iter ($path, $iter, %opts) {
     $opts{format} = "parquet"
     $opts{compression} //= "snappy"
     Arrow::write_iter($path, $iter, %opts)
 }
 
+## Parquet schema: { fields: [{name, type, nullable}, ...] }.
 fn Arrow::Parquet::schema ($path) {
     Arrow::_schema_impl($path, { format => "parquet" })
 }
 
+## Parquet footer stats: row count + per-column stats.
 fn Arrow::Parquet::stats ($path) {
     Arrow::_stats_impl($path, { format => "parquet" })
 }
 
+## Row count from parquet footer (no data scan).
 fn Arrow::Parquet::row_count ($path) {
     Arrow::_stats_impl($path, { format => "parquet" })->{num_rows}
 }

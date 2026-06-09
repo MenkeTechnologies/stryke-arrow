@@ -8,21 +8,25 @@ package Arrow::DataFrame
 
 use Arrow
 
+## Load $path into a DataFrame value (or columnar hashref fallback).
 fn Arrow::DataFrame::load ($path, %opts) {
     my $cw = Arrow::_read_columnar_impl($path, \%opts)
     Arrow::DataFrame::_columnar_to_df($cw)
 }
 
+## Dump a DataFrame to $path. Format inferred from extension.
 fn Arrow::DataFrame::dump ($path, $df, %opts) {
     my $rows = Arrow::DataFrame::_df_to_rows($df)
     Arrow::_write_impl($path, $rows, \%opts)
 }
 
+## Internal: convert columnar hashref to DataFrame.
 fn Arrow::DataFrame::_columnar_to_df ($cw) {
     my $cols = $cw->{columns}
     defined &dataframe ? dataframe($cols) : $cols
 }
 
+## Internal: convert DataFrame to arrayref of row hashrefs.
 fn Arrow::DataFrame::_df_to_rows ($df) {
     my %cols
     if (ref($df) eq "HASH") {

@@ -4,35 +4,42 @@ package Arrow::Feather
 
 use Arrow
 
+## Read $path as Feather (Arrow IPC v2) rows.
 fn Arrow::Feather::read ($path, %opts) {
     $opts{format} = "feather"
     Arrow::_read_impl($path, \%opts)
 }
 
+## Stream Feather rows: callback per row; returns count.
 fn Arrow::Feather::read_stream ($path, %opts) {
     $opts{format} = "feather"
     Arrow::read_stream($path, %opts)
 }
 
+## Read Feather in columnar shape.
 fn Arrow::Feather::read_columnar ($path, %opts) {
     $opts{format} = "feather"
     Arrow::_read_columnar_impl($path, \%opts)
 }
 
+## Write $rows to Feather at $path.
 fn Arrow::Feather::write ($path, $rows, %opts) {
     $opts{format} = "feather"
     Arrow::_write_impl($path, $rows, \%opts)
 }
 
+## Write rows produced by $iter coderef to Feather.
 fn Arrow::Feather::write_iter ($path, $iter, %opts) {
     $opts{format} = "feather"
     Arrow::write_iter($path, $iter, %opts)
 }
 
+## Feather schema.
 fn Arrow::Feather::schema ($path) {
     Arrow::_schema_impl($path, { format => "feather" })
 }
 
+## Feather stats.
 fn Arrow::Feather::stats ($path) {
     Arrow::_stats_impl($path, { format => "feather" })
 }

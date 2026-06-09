@@ -4,35 +4,42 @@ package Arrow::JSON
 
 use Arrow
 
+## Read $path as NDJSON rows.
 fn Arrow::JSON::read ($path, %opts) {
     $opts{format} = "json"
     Arrow::_read_impl($path, \%opts)
 }
 
+## Stream NDJSON rows: callback per row; returns count.
 fn Arrow::JSON::read_stream ($path, %opts) {
     $opts{format} = "json"
     Arrow::read_stream($path, %opts)
 }
 
+## Read NDJSON in columnar shape.
 fn Arrow::JSON::read_columnar ($path, %opts) {
     $opts{format} = "json"
     Arrow::_read_columnar_impl($path, \%opts)
 }
 
+## Write $rows to NDJSON at $path.
 fn Arrow::JSON::write ($path, $rows, %opts) {
     $opts{format} = "json"
     Arrow::_write_impl($path, $rows, \%opts)
 }
 
+## Write rows produced by $iter coderef to NDJSON.
 fn Arrow::JSON::write_iter ($path, $iter, %opts) {
     $opts{format} = "json"
     Arrow::write_iter($path, $iter, %opts)
 }
 
+## NDJSON schema (inferred).
 fn Arrow::JSON::schema ($path) {
     Arrow::_schema_impl($path, { format => "json" })
 }
 
+## NDJSON stats.
 fn Arrow::JSON::stats ($path) {
     Arrow::_stats_impl($path, { format => "json" })
 }

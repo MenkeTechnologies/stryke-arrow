@@ -13,6 +13,7 @@ package Arrow
 
 # ── error dispatch ────────────────────────────────────────────────────
 
+## Decode the cdylib's JSON return; die on `{error}` payload.
 fn Arrow::_decode ($name, $json) {
     my $o = from_json $json
     if (ref $o eq "HASH" && exists $o->{error}) {
@@ -23,6 +24,7 @@ fn Arrow::_decode ($name, $json) {
 
 # ── version ──────────────────────────────────────────────────────────
 
+## Return the package version string.
 fn Arrow::version {
     my $o = Arrow::_decode("version", arrow__version("{}"))
     $o->{version}
@@ -30,10 +32,12 @@ fn Arrow::version {
 
 # ── read ─────────────────────────────────────────────────────────────
 
+## Read $path as Arrow rows; opts: format, columns, limit, skip, batch_size.
 fn Arrow::read ($path, %opts) {
     Arrow::_read_impl($path, \%opts)
 }
 
+## Internal read implementation; see public wrappers.
 fn Arrow::_read_impl ($path, $o) {
     my %req = (
         path => $path,
@@ -60,10 +64,12 @@ fn Arrow::read_stream ($path, %opts) {
     $n
 }
 
+## Columnar shape: { columns, num_rows, data => { col => [vals] } }.
 fn Arrow::read_columnar ($path, %opts) {
     Arrow::_read_columnar_impl($path, \%opts)
 }
 
+## Internal columnar-read implementation; see public wrappers.
 fn Arrow::_read_columnar_impl ($path, $o) {
     my %req = (
         path => $path,
@@ -77,24 +83,29 @@ fn Arrow::_read_columnar_impl ($path, $o) {
 
 # ── schema + stats ───────────────────────────────────────────────────
 
+## Schema { fields: [{name, type, nullable}, ...] }.
 fn Arrow::schema ($path, %opts) {
     Arrow::_schema_impl($path, \%opts)
 }
 
+## Internal schema implementation; see public wrappers.
 fn Arrow::_schema_impl ($path, $o) {
     my %req = (path => $path, format => $o->{format})
     Arrow::_decode("schema", arrow__schema(to_json(\%req)))
 }
 
+## Footer-driven stats for parquet; scan-based for others.
 fn Arrow::stats ($path, %opts) {
     Arrow::_stats_impl($path, \%opts)
 }
 
+## Internal stats implementation; see public wrappers.
 fn Arrow::_stats_impl ($path, $o) {
     my %req = (path => $path, format => $o->{format})
     Arrow::_decode("stats", arrow__stats(to_json(\%req)))
 }
 
+## Row count (shortcut over stats()).
 fn Arrow::row_count ($path, %opts) {
     my $o = Arrow::stats($path, %opts)
     $o->{num_rows}
@@ -102,10 +113,12 @@ fn Arrow::row_count ($path, %opts) {
 
 # ── write ────────────────────────────────────────────────────────────
 
+## Write $rows (arrayref) to $path. Opts: format, compression, row_group.
 fn Arrow::write ($path, $rows, %opts) {
     Arrow::_write_impl($path, $rows, \%opts)
 }
 
+## Internal write implementation; see public wrappers.
 fn Arrow::_write_impl ($path, $rows, $o) {
     die "Arrow::write: rows must be arrayref" unless ref($rows) eq "ARRAY"
     my %req = (
@@ -131,6 +144,7 @@ fn Arrow::write_iter ($path, $iter, %opts) {
 
 # ── convert ──────────────────────────────────────────────────────────
 
+## Read $src and write $dst in possibly different formats.
 fn Arrow::convert ($src, $dst, %opts) {
     my %req = (
         src => $src,
