@@ -139,10 +139,8 @@ fn open_reader(
                 .build(file)?;
             if let Some(cols) = columns {
                 let indices = column_indices(&schema, cols)?;
-                let projected_fields: Vec<_> = indices
-                    .iter()
-                    .map(|i| schema.field(*i).clone())
-                    .collect();
+                let projected_fields: Vec<_> =
+                    indices.iter().map(|i| schema.field(*i).clone()).collect();
                 let projected_schema = Arc::new(Schema::new(projected_fields));
                 return Ok(Box::new(ProjectingReader {
                     inner: Box::new(reader),
@@ -163,10 +161,8 @@ fn open_reader(
                 .build(BufReader::new(file))?;
             if let Some(cols) = columns {
                 let indices = column_indices(&schema, cols)?;
-                let projected_fields: Vec<_> = indices
-                    .iter()
-                    .map(|i| schema.field(*i).clone())
-                    .collect();
+                let projected_fields: Vec<_> =
+                    indices.iter().map(|i| schema.field(*i).clone()).collect();
                 let projected_schema = Arc::new(Schema::new(projected_fields));
                 return Ok(Box::new(ProjectingReader {
                     inner: Box::new(reader),
@@ -219,7 +215,9 @@ impl RecordBatchReader for ProjectingReader {
 // ── core ops ────────────────────────────────────────────────────────────────
 
 fn op_read(args: Value) -> Result<Value> {
-    let path = args["path"].as_str().ok_or_else(|| anyhow!("missing path"))?;
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
     let path = Path::new(path);
     let fmt = Fmt::from_override_or_path(args["format"].as_str(), path)?;
     let cols = parse_columns(&args["columns"]);
@@ -281,10 +279,7 @@ fn op_read(args: Value) -> Result<Value> {
 fn op_read_columnar(args: Value) -> Result<Value> {
     let read_args = args.clone();
     let r = op_read(read_args)?;
-    let names = r["columns"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let names = r["columns"].as_array().cloned().unwrap_or_default();
     let rows = r["rows"].as_array().cloned().unwrap_or_default();
     let mut data = Map::new();
     for n in &names {
@@ -305,7 +300,9 @@ fn op_read_columnar(args: Value) -> Result<Value> {
 }
 
 fn op_schema(args: Value) -> Result<Value> {
-    let path = args["path"].as_str().ok_or_else(|| anyhow!("missing path"))?;
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
     let path = Path::new(path);
     let fmt = Fmt::from_override_or_path(args["format"].as_str(), path)?;
     let reader = open_reader(path, fmt, None, 8192)?;
@@ -325,7 +322,9 @@ fn op_schema(args: Value) -> Result<Value> {
 }
 
 fn op_stats(args: Value) -> Result<Value> {
-    let path = args["path"].as_str().ok_or_else(|| anyhow!("missing path"))?;
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
     let path_buf = Path::new(path);
     let fmt = Fmt::from_override_or_path(args["format"].as_str(), path_buf)?;
     if let Fmt::Parquet = fmt {
@@ -346,26 +345,21 @@ fn op_stats(args: Value) -> Result<Value> {
                 let entry = match stats {
                     Some(s) => {
                         let (min_s, max_s) = match s {
-                            Statistics::Boolean(s) => (
-                                s.min_opt().map(|v| json!(v)),
-                                s.max_opt().map(|v| json!(v)),
-                            ),
-                            Statistics::Int32(s) => (
-                                s.min_opt().map(|v| json!(v)),
-                                s.max_opt().map(|v| json!(v)),
-                            ),
-                            Statistics::Int64(s) => (
-                                s.min_opt().map(|v| json!(v)),
-                                s.max_opt().map(|v| json!(v)),
-                            ),
-                            Statistics::Float(s) => (
-                                s.min_opt().map(|v| json!(v)),
-                                s.max_opt().map(|v| json!(v)),
-                            ),
-                            Statistics::Double(s) => (
-                                s.min_opt().map(|v| json!(v)),
-                                s.max_opt().map(|v| json!(v)),
-                            ),
+                            Statistics::Boolean(s) => {
+                                (s.min_opt().map(|v| json!(v)), s.max_opt().map(|v| json!(v)))
+                            }
+                            Statistics::Int32(s) => {
+                                (s.min_opt().map(|v| json!(v)), s.max_opt().map(|v| json!(v)))
+                            }
+                            Statistics::Int64(s) => {
+                                (s.min_opt().map(|v| json!(v)), s.max_opt().map(|v| json!(v)))
+                            }
+                            Statistics::Float(s) => {
+                                (s.min_opt().map(|v| json!(v)), s.max_opt().map(|v| json!(v)))
+                            }
+                            Statistics::Double(s) => {
+                                (s.min_opt().map(|v| json!(v)), s.max_opt().map(|v| json!(v)))
+                            }
                             _ => (None, None),
                         };
                         json!({
@@ -441,7 +435,9 @@ fn compression_for(name: &str) -> Result<Compression> {
 }
 
 fn op_write(args: Value) -> Result<Value> {
-    let path = args["path"].as_str().ok_or_else(|| anyhow!("missing path"))?;
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
     let path = Path::new(path);
     let fmt = Fmt::from_override_or_path(args["format"].as_str(), path)?;
     let compression = args["compression"].as_str().unwrap_or("snappy").to_string();
@@ -575,9 +571,7 @@ pub unsafe extern "C" fn stryke_free_cstring(p: *mut c_char) {
 
 #[no_mangle]
 pub extern "C" fn arrow__version(args: *const c_char) -> *const c_char {
-    ffi_call(args, |_| {
-        Ok(json!({"version": env!("CARGO_PKG_VERSION")}))
-    })
+    ffi_call(args, |_| Ok(json!({"version": env!("CARGO_PKG_VERSION")})))
 }
 
 #[no_mangle]
