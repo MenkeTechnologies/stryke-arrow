@@ -1,8 +1,8 @@
-# lib/DataFrame.stk — `use Arrow::DataFrame`
-#
-# Bridge between Arrow files and stryke's built-in `dataframe()` columnar
-# value. Falls back to a plain `{ col => [vals] }` hashref when this stryke
-# build doesn't expose `dataframe()`.
+## lib/DataFrame.stk — `use Arrow::DataFrame`
+##
+## Bridge between Arrow files and stryke's built-in `dataframe()` columnar
+## value. Falls back to a plain `{ col => [vals] }` hashref when this stryke
+## build doesn't expose `dataframe()`.
 
 package Arrow::DataFrame
 

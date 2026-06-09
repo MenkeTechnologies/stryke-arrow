@@ -1,13 +1,13 @@
-# lib/Arrow.stk — Apache Arrow / Parquet / IPC / CSV / JSON for stryke.
-#
-# Thin wrapper around the `stryke-arrow` cdylib's `arrow__*` exports. The
-# cdylib is dlopened in-process on first `use Arrow` (see stryke's
-# `pkg/commands.rs::try_load_ffi_for`) and registers each export as a
-# stryke-callable function via `rust_ffi::load_cdylib`.
-#
-# Replaces the v1 helper-binary model (fork(2) + exec(2) + NDJSON over a
-# pipe). Stateless package — arrow operations don't carry process-level
-# state between calls.
+## lib/Arrow.stk — Apache Arrow / Parquet / IPC / CSV / JSON for stryke.
+##
+## Thin wrapper around the `stryke-arrow` cdylib's `arrow__*` exports. The
+## cdylib is dlopened in-process on first `use Arrow` (see stryke's
+## `pkg/commands.rs::try_load_ffi_for`) and registers each export as a
+## stryke-callable function via `rust_ffi::load_cdylib`.
+##
+## Replaces the v1 helper-binary model (fork(2) + exec(2) + NDJSON over a
+## pipe). Stateless package — arrow operations don't carry process-level
+## state between calls.
 
 package Arrow
 
@@ -47,7 +47,7 @@ fn Arrow::_read_impl ($path, $o) {
     @{ $res->{rows} }
 }
 
-# Callback fires per row. The cdylib returns all rows in one call.
+## Callback fires per row. The cdylib returns all rows in one call.
 fn Arrow::read_stream ($path, %opts) {
     die "Arrow::read_stream: callback => sub { … } required" unless defined $opts{callback}
     my $cb = $opts{callback}
@@ -118,9 +118,9 @@ fn Arrow::_write_impl ($path, $rows, $o) {
     Arrow::_decode("write", arrow__write(to_json(\%req)))
 }
 
-# Streaming write: $iter is a coderef returning a row at a time (undef = EOF).
-# We buffer + write in one shot; the in-process FFI removes the per-row
-# pipe-flush latency the v1 helper paid for incremental writes.
+## Streaming write: $iter is a coderef returning a row at a time (undef = EOF).
+## We buffer + write in one shot; the in-process FFI removes the per-row
+## pipe-flush latency the v1 helper paid for incremental writes.
 fn Arrow::write_iter ($path, $iter, %opts) {
     my @rows
     while (defined (my $row = $iter->())) {

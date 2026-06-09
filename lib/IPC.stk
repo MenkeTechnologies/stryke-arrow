@@ -1,4 +1,4 @@
-# lib/IPC.stk — `use Arrow::IPC` (Arrow IPC file format, aka Feather v2)
+## lib/IPC.stk — `use Arrow::IPC` (Arrow IPC file format, aka Feather v2)
 
 package Arrow::IPC
 

@@ -1,4 +1,4 @@
-# lib/Feather.stk — `use Arrow::Feather` (Feather v2 == Arrow IPC, alias)
+## lib/Feather.stk — `use Arrow::Feather` (Feather v2 == Arrow IPC, alias)
 
 package Arrow::Feather
 

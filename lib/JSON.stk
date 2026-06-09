@@ -1,4 +1,4 @@
-# lib/JSON.stk — `use Arrow::JSON` (vectorized NDJSON reader/writer)
+## lib/JSON.stk — `use Arrow::JSON` (vectorized NDJSON reader/writer)
 
 package Arrow::JSON
 

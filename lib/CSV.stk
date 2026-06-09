@@ -1,4 +1,4 @@
-# lib/CSV.stk — `use Arrow::CSV` (vectorized arrow-csv reader/writer)
+## lib/CSV.stk — `use Arrow::CSV` (vectorized arrow-csv reader/writer)
 
 package Arrow::CSV
 
