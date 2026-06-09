@@ -377,6 +377,7 @@ fn op_stats(args: Value) -> Result<Value> {
         return Ok(json!({
             "num_rows": num_rows,
             "num_row_groups": num_row_groups,
+            "num_columns": cols.len(),
             "columns": cols,
         }));
     }
@@ -392,7 +393,11 @@ fn op_stats(args: Value) -> Result<Value> {
         .iter()
         .map(|f| json!({"name": f.name(), "type": format!("{:?}", f.data_type())}))
         .collect();
-    Ok(json!({"num_rows": num_rows, "columns": cols}))
+    Ok(json!({
+        "num_rows": num_rows,
+        "num_columns": cols.len(),
+        "columns": cols,
+    }))
 }
 
 // ── writers ─────────────────────────────────────────────────────────────────

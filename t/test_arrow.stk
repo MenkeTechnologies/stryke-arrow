@@ -50,7 +50,7 @@ for val $t (@formats) {
 
     val $stats = Arrow::stats($path)
     assert_eq $stats->{num_rows}, 4, "$name: stats.num_rows == 4"
-    assert_eq scalar(@{$stats->{columns}}), 4, "$name: stats.columns has 4 entries"
+    assert_eq $stats->{num_columns}, 4, "$name: stats.num_columns == 4"
 }
 
 # ── parquet-specific: schema shape ───────────────────────────────────
