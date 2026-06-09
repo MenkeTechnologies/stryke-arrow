@@ -5,13 +5,13 @@
 
 use Arrow
 
-my ($src, $dst, $comp) = @ARGV
+var ($src, $dst, $comp) = @ARGV
 die "usage: csv_to_parquet.stk SRC.csv DST.parquet [compression]\n" unless defined $dst
 $comp //= "zstd"
 
 Arrow::convert($src, $dst, compression => $comp)
 
-my $stats = Arrow::stats($dst)
+val $stats = Arrow::stats($dst)
 p sprintf("wrote %d rows × %d cols (%s, %s) → %s",
     $stats->{num_rows}, $stats->{num_columns}, $comp,
     human_bytes($stats->{file_size}), $dst)

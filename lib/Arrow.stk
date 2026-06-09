@@ -15,7 +15,7 @@ package Arrow
 
 ## Decode the cdylib's JSON return; die on `{error}` payload.
 fn Arrow::_decode ($name, $json) {
-    my $o = from_json $json
+    val $o = from_json $json
     if (ref $o eq "HASH" && exists $o->{error}) {
         die "Arrow::$name: $o->{error}"
     }
@@ -26,7 +26,7 @@ fn Arrow::_decode ($name, $json) {
 
 ## Return the package version string.
 fn Arrow::version {
-    my $o = Arrow::_decode("version", arrow__version("{}"))
+    val $o = Arrow::_decode("version", arrow__version("{}"))
     $o->{version}
 }
 
@@ -39,7 +39,7 @@ fn Arrow::read ($path, %opts) {
 
 ## Internal read implementation; see public wrappers.
 fn Arrow::_read_impl ($path, $o) {
-    my %req = (
+    val %req = (
         path => $path,
         format => $o->{format},
         columns => $o->{columns},
@@ -47,17 +47,17 @@ fn Arrow::_read_impl ($path, $o) {
         skip => $o->{skip},
         batch_size => $o->{batch_size},
     )
-    my $res = Arrow::_decode("read", arrow__read(to_json(\%req)))
+    val $res = Arrow::_decode("read", arrow__read(to_json(\%req)))
     @{ $res->{rows} }
 }
 
 ## Callback fires per row. The cdylib returns all rows in one call.
 fn Arrow::read_stream ($path, %opts) {
     die "Arrow::read_stream: callback => sub { … } required" unless defined $opts{callback}
-    my $cb = $opts{callback}
-    my @rows = Arrow::_read_impl($path, \%opts)
-    my $n = 0
-    for my $row (@rows) {
+    val $cb = $opts{callback}
+    val @rows = Arrow::_read_impl($path, \%opts)
+    var $n = 0
+    for val $row (@rows) {
         $cb->($row)
         $n++
     }
@@ -71,7 +71,7 @@ fn Arrow::read_columnar ($path, %opts) {
 
 ## Internal columnar-read implementation; see public wrappers.
 fn Arrow::_read_columnar_impl ($path, $o) {
-    my %req = (
+    val %req = (
         path => $path,
         format => $o->{format},
         columns => $o->{columns},
@@ -90,7 +90,7 @@ fn Arrow::schema ($path, %opts) {
 
 ## Internal schema implementation; see public wrappers.
 fn Arrow::_schema_impl ($path, $o) {
-    my %req = (path => $path, format => $o->{format})
+    val %req = (path => $path, format => $o->{format})
     Arrow::_decode("schema", arrow__schema(to_json(\%req)))
 }
 
@@ -101,13 +101,13 @@ fn Arrow::stats ($path, %opts) {
 
 ## Internal stats implementation; see public wrappers.
 fn Arrow::_stats_impl ($path, $o) {
-    my %req = (path => $path, format => $o->{format})
+    val %req = (path => $path, format => $o->{format})
     Arrow::_decode("stats", arrow__stats(to_json(\%req)))
 }
 
 ## Row count (shortcut over stats()).
 fn Arrow::row_count ($path, %opts) {
-    my $o = Arrow::stats($path, %opts)
+    val $o = Arrow::stats($path, %opts)
     $o->{num_rows}
 }
 
@@ -121,7 +121,7 @@ fn Arrow::write ($path, $rows, %opts) {
 ## Internal write implementation; see public wrappers.
 fn Arrow::_write_impl ($path, $rows, $o) {
     die "Arrow::write: rows must be arrayref" unless ref($rows) eq "ARRAY"
-    my %req = (
+    val %req = (
         path => $path,
         rows => $rows,
         format => $o->{format},
@@ -135,8 +135,8 @@ fn Arrow::_write_impl ($path, $rows, $o) {
 ## We buffer + write in one shot; the in-process FFI removes the per-row
 ## pipe-flush latency the v1 helper paid for incremental writes.
 fn Arrow::write_iter ($path, $iter, %opts) {
-    my @rows
-    while (defined (my $row = $iter->())) {
+    var @rows
+    while (defined (val $row = $iter->())) {
         push @rows, $row
     }
     Arrow::_write_impl($path, \@rows, \%opts)
@@ -146,7 +146,7 @@ fn Arrow::write_iter ($path, $iter, %opts) {
 
 ## Read $src and write $dst in possibly different formats.
 fn Arrow::convert ($src, $dst, %opts) {
-    my %req = (
+    val %req = (
         src => $src,
         dst => $dst,
         src_format => $opts{src_format},

@@ -6,10 +6,10 @@
 
 use Arrow::DataFrame
 
-my $path = $ARGV[0]
+val $path = $ARGV[0]
 die "usage: dataframe_bridge.stk PATH.parquet\n" unless defined $path
 
-my $df = Arrow::DataFrame::load($path)
+val $df = Arrow::DataFrame::load($path)
 
 # At this point $df is either a stryke DataFrame (with ->filter / ->group_by /
 # ->sum / ->nrow / ->ncol) or, if dataframe() isn't built into this stryke,
@@ -17,7 +17,7 @@ my $df = Arrow::DataFrame::load($path)
 
 if (ref($df) eq "HASH") {
     p "loaded " . scalar(keys %$df) . " columns; stryke build has no dataframe() builtin"
-    for my $col (keys %$df) {
+    for val $col (keys %$df) {
         p "  $col: " . scalar(@{ $df->{$col} }) . " values"
     }
 } else {
