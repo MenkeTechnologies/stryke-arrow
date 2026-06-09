@@ -1,8 +1,9 @@
-# t/test_arrow.stk — round-trip tests against the in-process cdylib.
-#
-# Requires the cdylib to be loaded. Install once with `s pkg install -g .`
-# from the package root so stryke's FFI bridge dlopens
-# lib/libstryke_arrow.{dylib,so} on `use Arrow`.
+## t/test_arrow.stk — assertion tests for the stryke `Arrow` package.
+##
+## Uses stryke's native test framework (`assert_*` + `test_run`).
+## Requires the cdylib to be loaded — install once with `s pkg install -g .`
+## from the package root so stryke's FFI bridge dlopens
+## `lib/libstryke_arrow.{dylib,so}` on `use Arrow`.
 
 use Arrow
 use Arrow::Parquet
@@ -10,12 +11,12 @@ use Arrow::IPC
 use Arrow::CSV
 use Arrow::JSON
 
-val $have_cdylib = eval { Arrow::version(); 1 }
-unless ($have_cdylib) {
-    p "1..0 # SKIP cdylib not loaded — run `s pkg install -g .` first"
-    exit 0
-}
+# ── cdylib reachability ──────────────────────────────────────────────
+val $version = Arrow::version()
+assert_ok $version, "Arrow::version returns truthy (cdylib loaded)"
+assert_match $version, qr/^\d+/, "Arrow::version starts with a digit"
 
+# ── round-trip dataset ───────────────────────────────────────────────
 # Tiny dataset that exercises ints, floats, strings, nulls.
 val @rows = (
     { id => 1, name => "alice",   score => 1.5,  city => "ny" },
@@ -27,109 +28,59 @@ val @rows = (
 val $tmp = "/tmp/stryke-arrow-test-$$"
 mkdir $tmp unless -d $tmp
 
-val @tests = (
-    { name => "parquet round-trip", file => "$tmp/x.parquet" },
-    { name => "ipc round-trip",     file => "$tmp/x.arrow"   },
-    { name => "csv round-trip",     file => "$tmp/x.csv"     },
-    { name => "json round-trip",    file => "$tmp/x.json"    },
-    { name => "feather round-trip", file => "$tmp/x.feather" },
+val @formats = (
+    { name => "parquet", file => "$tmp/x.parquet" },
+    { name => "ipc",     file => "$tmp/x.arrow"   },
+    { name => "csv",     file => "$tmp/x.csv"     },
+    { name => "json",    file => "$tmp/x.json"    },
+    { name => "feather", file => "$tmp/x.feather" },
 )
-val $plan = scalar(@tests) * 3 + 4
-p "1..$plan"
 
-var $i = 0
-for val $t (@tests) {
+# Per-format: write, read-back row count, name preservation, stats shape.
+for val $t (@formats) {
     val $path = $t->{file}
     val $name = $t->{name}
 
-    eval {
-        Arrow::write($path, \@rows)
-        $i++
-        p "ok $i - $name write"
-    }
-    if ($@) {
-        $i++
-        p "not ok $i - $name write: $@"
-        $i++
-        p "not ok $i - $name read skipped"
-        $i++
-        p "not ok $i - $name rowcount skipped"
-        next
-    }
+    Arrow::write($path, \@rows)
+    assert_ok -e $path, "$name: write produces file"
 
-    var @back
-    eval { @back = Arrow::read($path) }
-    $i++
-    if ($@) {
-        p "not ok $i - $name read: $@"
-    } else {
-        var $ok = scalar(@back) == scalar(@rows) && $back[0]->{name} eq "alice"
-        p ($ok ? "ok $i - $name read" : "not ok $i - $name read (got " . scalar(@back) . " rows)")
-    }
+    val @back = Arrow::read($path)
+    assert_eq scalar(@back), 4, "$name: read returns 4 rows"
+    assert_eq $back[0]->{name}, "alice", "$name: first row name preserved"
 
-    var $stats
-    eval { $stats = Arrow::stats($path) }
-    $i++
-    if ($@) {
-        p "not ok $i - $name stats: $@"
-    } else {
-        var $ok = $stats->{num_rows} == 4 && $stats->{num_columns} == 4
-        p ($ok ? "ok $i - $name stats" : "not ok $i - $name stats (rows=$stats->{num_rows} cols=$stats->{num_columns})")
-    }
+    val $stats = Arrow::stats($path)
+    assert_eq $stats->{num_rows}, 4, "$name: stats.num_rows == 4"
+    assert_eq $stats->{num_columns}, 4, "$name: stats.num_columns == 4"
 }
 
-# schema test: parquet
-var $sch
-eval { $sch = Arrow::schema("$tmp/x.parquet") }
-$i++
-if ($@) {
-    p "not ok $i - parquet schema: $@"
-} else {
-    var $ok = ref($sch->{fields}) eq "ARRAY" && scalar(@{ $sch->{fields} }) == 4
-    p ($ok ? "ok $i - parquet schema" : "not ok $i - parquet schema bad shape")
-}
+# ── parquet-specific: schema shape ───────────────────────────────────
+val $sch = Arrow::schema("$tmp/x.parquet")
+assert_eq ref($sch->{fields}), "ARRAY", "parquet schema.fields is array"
+assert_eq scalar(@{ $sch->{fields} }), 4, "parquet schema has 4 fields"
 
-# columnar test
-var $cw
-eval { $cw = Arrow::read_columnar("$tmp/x.parquet") }
-$i++
-if ($@) {
-    p "not ok $i - parquet read_columnar: $@"
-} else {
-    var $ok = $cw->{num_rows} == 4
-              && ref($cw->{columns}) eq "HASH"
-              && exists $cw->{columns}{id}
-    p ($ok ? "ok $i - parquet read_columnar" : "not ok $i - parquet read_columnar bad shape")
-}
+# ── columnar read ────────────────────────────────────────────────────
+val $cw = Arrow::read_columnar("$tmp/x.parquet")
+assert_eq $cw->{num_rows}, 4, "parquet columnar: 4 rows"
+assert_eq ref($cw->{columns}), "HASH", "parquet columnar.columns is hash"
+assert_ok exists $cw->{columns}{id}, "parquet columnar has id column"
 
-# convert: parquet → csv
-var $rc
-eval { $rc = Arrow::convert("$tmp/x.parquet", "$tmp/conv.csv") }
-$i++
-if ($@) {
-    p "not ok $i - convert parquet→csv: $@"
-} else {
-    var $ok = -e "$tmp/conv.csv" && -s "$tmp/conv.csv" > 0
-    p ($ok ? "ok $i - convert parquet→csv" : "not ok $i - convert parquet→csv empty")
-}
+# ── format conversion: parquet → csv ─────────────────────────────────
+Arrow::convert("$tmp/x.parquet", "$tmp/conv.csv")
+assert_ok -e "$tmp/conv.csv", "convert parquet→csv produces file"
+assert_gt -s "$tmp/conv.csv", 0, "convert parquet→csv file is non-empty"
 
-# column projection
-var @proj
-eval { @proj = Arrow::read("$tmp/x.parquet", columns => ["id", "name"]) }
-$i++
-if ($@) {
-    p "not ok $i - parquet column projection: $@"
-} else {
-    val $ok = scalar(@proj) == 4
-              && !exists $proj[0]->{score}
-              && exists $proj[0]->{id}
-              && exists $proj[0]->{name}
-    p ($ok ? "ok $i - parquet column projection" : "not ok $i - parquet column projection wrong fields")
-}
+# ── column projection ────────────────────────────────────────────────
+val @proj = Arrow::read("$tmp/x.parquet", columns => ["id", "name"])
+assert_eq scalar(@proj), 4, "projection preserves row count"
+assert_ok exists $proj[0]->{id}, "projection includes id"
+assert_ok exists $proj[0]->{name}, "projection includes name"
+assert_ok !exists $proj[0]->{score}, "projection excludes score"
 
-# cleanup
-for val $t (@tests) {
+# ── cleanup ──────────────────────────────────────────────────────────
+for val $t (@formats) {
     unlink $t->{file} if -e $t->{file}
 }
 unlink "$tmp/conv.csv" if -e "$tmp/conv.csv"
 rmdir $tmp if -d $tmp
+
+test_run

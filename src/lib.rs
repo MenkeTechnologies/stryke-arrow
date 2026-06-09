@@ -603,3 +603,164 @@ pub extern "C" fn arrow__write(args: *const c_char) -> *const c_char {
 pub extern "C" fn arrow__convert(args: *const c_char) -> *const c_char {
     ffi_call(args, op_convert)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::datatypes::{DataType, Field, Schema};
+
+    #[test]
+    fn fmt_parse_canonical_names() {
+        assert_eq!(Fmt::parse("parquet").unwrap(), Fmt::Parquet);
+        assert_eq!(Fmt::parse("ipc").unwrap(), Fmt::Ipc);
+        assert_eq!(Fmt::parse("feather").unwrap(), Fmt::Feather);
+        assert_eq!(Fmt::parse("csv").unwrap(), Fmt::Csv);
+        assert_eq!(Fmt::parse("json").unwrap(), Fmt::Json);
+    }
+
+    #[test]
+    fn fmt_parse_aliases_collapse() {
+        assert_eq!(Fmt::parse("pq").unwrap(), Fmt::Parquet);
+        assert_eq!(Fmt::parse("arrow").unwrap(), Fmt::Ipc);
+        assert_eq!(Fmt::parse("tsv").unwrap(), Fmt::Csv);
+        assert_eq!(Fmt::parse("ndjson").unwrap(), Fmt::Json);
+        assert_eq!(Fmt::parse("jsonl").unwrap(), Fmt::Json);
+    }
+
+    #[test]
+    fn fmt_parse_is_case_insensitive() {
+        assert_eq!(Fmt::parse("PARQUET").unwrap(), Fmt::Parquet);
+        assert_eq!(Fmt::parse("Csv").unwrap(), Fmt::Csv);
+        assert_eq!(Fmt::parse("JSON").unwrap(), Fmt::Json);
+    }
+
+    #[test]
+    fn fmt_parse_unknown_errors_with_hint() {
+        let err = Fmt::parse("orc").unwrap_err().to_string();
+        assert!(err.contains("orc"), "{err}");
+        assert!(
+            err.contains("parquet|ipc|feather|csv|json"),
+            "missing hint: {err}"
+        );
+    }
+
+    #[test]
+    fn fmt_detect_uses_extension() {
+        assert_eq!(
+            Fmt::detect(Path::new("/tmp/a.parquet")).unwrap(),
+            Fmt::Parquet
+        );
+        assert_eq!(Fmt::detect(Path::new("/tmp/a.csv")).unwrap(), Fmt::Csv);
+        assert_eq!(Fmt::detect(Path::new("/tmp/a.JSON")).unwrap(), Fmt::Json);
+    }
+
+    #[test]
+    fn fmt_detect_no_extension_errors() {
+        let err = Fmt::detect(Path::new("/tmp/no_ext"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no extension"), "{err}");
+    }
+
+    #[test]
+    fn fmt_from_override_wins_over_extension() {
+        // Explicit format must override path-detected extension.
+        assert_eq!(
+            Fmt::from_override_or_path(Some("ipc"), Path::new("/tmp/a.parquet")).unwrap(),
+            Fmt::Ipc
+        );
+    }
+
+    #[test]
+    fn fmt_from_override_falls_back_to_path_when_none() {
+        assert_eq!(
+            Fmt::from_override_or_path(None, Path::new("/tmp/a.parquet")).unwrap(),
+            Fmt::Parquet
+        );
+    }
+
+    #[test]
+    fn parse_columns_handles_array_strings() {
+        let v = json!(["a", "b", "c"]);
+        assert_eq!(
+            parse_columns(&v),
+            Some(vec!["a".into(), "b".into(), "c".into()])
+        );
+    }
+
+    #[test]
+    fn parse_columns_filters_non_strings() {
+        let v = json!(["a", 1, "b", null]);
+        assert_eq!(parse_columns(&v), Some(vec!["a".into(), "b".into()]));
+    }
+
+    #[test]
+    fn parse_columns_non_array_is_none() {
+        assert_eq!(parse_columns(&json!("not-an-array")), None);
+        assert_eq!(parse_columns(&json!(null)), None);
+        assert_eq!(parse_columns(&json!({"a":1})), None);
+    }
+
+    #[test]
+    fn compression_canonical_names() {
+        // Compress enum lacks Eq, so just compare the rendered form.
+        assert!(matches!(
+            compression_for("none").unwrap(),
+            Compression::UNCOMPRESSED
+        ));
+        assert!(matches!(
+            compression_for("snappy").unwrap(),
+            Compression::SNAPPY
+        ));
+        assert!(matches!(
+            compression_for("lz4").unwrap(),
+            Compression::LZ4_RAW
+        ));
+    }
+
+    #[test]
+    fn compression_aliases_and_case() {
+        assert!(matches!(
+            compression_for("UNCOMPRESSED").unwrap(),
+            Compression::UNCOMPRESSED
+        ));
+        assert!(matches!(
+            compression_for("Gzip").unwrap(),
+            Compression::GZIP(_)
+        ));
+        assert!(matches!(
+            compression_for("ZSTD").unwrap(),
+            Compression::ZSTD(_)
+        ));
+        assert!(matches!(
+            compression_for("brotli").unwrap(),
+            Compression::BROTLI(_)
+        ));
+    }
+
+    #[test]
+    fn compression_unknown_errors() {
+        let err = compression_for("lzma").unwrap_err().to_string();
+        assert!(err.contains("lzma"), "{err}");
+    }
+
+    #[test]
+    fn column_indices_maps_names_to_positions() {
+        let schema: SchemaRef = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("price", DataType::Float64, true),
+        ]));
+        let names = vec!["price".to_string(), "id".to_string()];
+        assert_eq!(column_indices(&schema, &names).unwrap(), vec![2, 0]);
+    }
+
+    #[test]
+    fn column_indices_missing_name_errors() {
+        let schema: SchemaRef =
+            Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let names = vec!["bogus".to_string()];
+        let err = column_indices(&schema, &names).unwrap_err().to_string();
+        assert!(err.contains("bogus"), "{err}");
+    }
+}
