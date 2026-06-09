@@ -1,164 +1,63 @@
-# lib/Arrow.stk — Apache Arrow / Parquet / IPC / Feather / CSV / JSON for stryke.
+# lib/Arrow.stk — Apache Arrow / Parquet / IPC / CSV / JSON for stryke.
 #
-# Architecture:
-#   stryke side: pure-stryke wrappers, NDJSON pipe protocol.
-#   helper:      `stryke-arrow-helper` Rust binary (this package) backed by
-#                arrow-rs + parquet-rs. Compiled with `cargo build --release`
-#                or `s run build`. Kept out of the stryke core binary so
-#                arrow's 200+ transitive crates don't bloat every install.
+# Thin wrapper around the `stryke-arrow` cdylib's `arrow__*` exports. The
+# cdylib is dlopened in-process on first `use Arrow` (see stryke's
+# `pkg/commands.rs::try_load_ffi_for`) and registers each export as a
+# stryke-callable function via `rust_ffi::load_cdylib`.
 #
-# Discovery order for the helper binary:
-#   1. $ENV{STRYKE_ARROW_HELPER}             (explicit override)
-#   2. <pkg_root>/target/release/...         (built in source dir)
-#   3. <pkg_root>/target/debug/...
-#   4. <pkg_root>/bin/stryke-arrow-helper    (vendored)
-#   5. `which stryke-arrow-helper`           (system install)
-#
-# Internal note: same-package fn-to-fn calls pass `$o` as a hashref rather
-# than flattening `%opts`. stryke currently drops named opts when reslurped
-# across required-file fn boundaries; the hashref path side-steps that.
+# Replaces the v1 helper-binary model (fork(2) + exec(2) + NDJSON over a
+# pipe). Stateless package — arrow operations don't carry process-level
+# state between calls.
 
 package Arrow
 
-our $HELPER
+# ── error dispatch ────────────────────────────────────────────────────
 
-fn Arrow::pkg_root {
-    my @parts = split "/", __FILE__
-    pop @parts
-    pop @parts
-    my $root = join "/", @parts
-    $root ne "" ? $root : "."
+fn Arrow::_decode ($name, $json) {
+    my $o = from_json $json
+    if (ref $o eq "HASH" && exists $o->{error}) {
+        die "Arrow::$name: $o->{error}"
+    }
+    $o
 }
 
-fn Arrow::helper_path {
-    return $Arrow::HELPER if defined $Arrow::HELPER && -x $Arrow::HELPER
+# ── version ──────────────────────────────────────────────────────────
 
-    if (exists $ENV{STRYKE_ARROW_HELPER} && $ENV{STRYKE_ARROW_HELPER} ne "") {
-        my $p = $ENV{STRYKE_ARROW_HELPER}
-        die "stryke-arrow: STRYKE_ARROW_HELPER=$p is not an executable file" unless -x $p
-        $Arrow::HELPER = $p
-        return $p
-    }
-
-    my $root = Arrow::pkg_root()
-    for my $cand (
-        "$root/target/release/stryke-arrow-helper",
-        "$root/target/debug/stryke-arrow-helper",
-        "$root/bin/stryke-arrow-helper",
-    ) {
-        if (-x $cand) {
-            $Arrow::HELPER = $cand
-            return $cand
-        }
-    }
-
-    my $which = qx{command -v stryke-arrow-helper 2>/dev/null}
-    chomp $which
-    if ($which ne "" && -x $which) {
-        $Arrow::HELPER = $which
-        return $which
-    }
-
-    die "stryke-arrow: helper binary not found.\n" .
-        "  Build it once with:  cd $root && cargo build --release\n" .
-        "  Or set STRYKE_ARROW_HELPER=/path/to/stryke-arrow-helper\n"
+fn Arrow::version {
+    my $o = Arrow::_decode("version", arrow__version("{}"))
+    $o->{version}
 }
 
-fn Arrow::ensure_built {
-    my $root = Arrow::pkg_root()
-    for my $cand ("$root/target/release/stryke-arrow-helper",
-                  "$root/target/debug/stryke-arrow-helper") {
-        return $cand if -x $cand
-    }
-    return Arrow::helper_path() if exists $ENV{STRYKE_ARROW_HELPER}
-
-    p "stryke-arrow: building helper (cargo build --release)..."
-    my $rc = system "cd " . Arrow::_shq($root) . " && cargo build --release"
-    die "stryke-arrow: cargo build failed (rc=$rc)" if $rc != 0
-    Arrow::helper_path()
-}
-
-# Single-quote shell-escape: wrap in '…' and replace embedded ' with '\'' .
-fn Arrow::_shq ($s) {
-    my $t = $s
-    $t =~ s/'/'\\''/g
-    "'$t'"
-}
-
-# Build the helper command line for a subcommand. $o is a hashref.
-fn Arrow::_cmd ($sub, $path, $o) {
-    my @parts = (Arrow::_shq(Arrow::helper_path()), Arrow::_shq($sub))
-    if (defined $path && $path ne "") {
-        push @parts, Arrow::_shq($path)
-    }
-    if (defined $o->{format}) {
-        push @parts, "--format", Arrow::_shq($o->{format})
-    }
-    if (defined $o->{columns}) {
-        my $cols = ref($o->{columns}) eq "ARRAY"
-            ? join(",", @{ $o->{columns} })
-            : $o->{columns}
-        push @parts, "--columns", Arrow::_shq($cols)
-    }
-    if (defined $o->{limit}) {
-        push @parts, "--limit", Arrow::_shq($o->{limit})
-    }
-    if (defined $o->{skip} && $o->{skip} > 0) {
-        push @parts, "--skip", Arrow::_shq($o->{skip})
-    }
-    if (defined $o->{batch_size}) {
-        push @parts, "--batch-size", Arrow::_shq($o->{batch_size})
-    }
-    if (defined $o->{compression}) {
-        push @parts, "--compression", Arrow::_shq($o->{compression})
-    }
-    if (defined $o->{row_group}) {
-        push @parts, "--row-group", Arrow::_shq($o->{row_group})
-    }
-    if (defined $o->{schema}) {
-        push @parts, "--schema", Arrow::_shq($o->{schema})
-    }
-    join " ", @parts
-}
-
-# ---------------------------------------------------------------------------
-# Read paths
-# ---------------------------------------------------------------------------
+# ── read ─────────────────────────────────────────────────────────────
 
 fn Arrow::read ($path, %opts) {
     Arrow::_read_impl($path, \%opts)
 }
 
 fn Arrow::_read_impl ($path, $o) {
-    die "Arrow::read: file `$path` not found" unless -e $path
-    my $cmd = Arrow::_cmd("read", $path, $o)
-    my @rows
-    open my $fh, "-|", $cmd or die "Arrow::read: failed to spawn helper: $!"
-    while (my $line = <$fh>) {
-        chomp $line
-        next if $line eq ""
-        push @rows, from_json $line
-    }
-    close $fh or die "Arrow::read: helper exited non-zero ($?)"
-    @rows
+    my %req = (
+        path => $path,
+        format => $o->{format},
+        columns => $o->{columns},
+        limit => $o->{limit},
+        skip => $o->{skip},
+        batch_size => $o->{batch_size},
+    )
+    my $res = Arrow::_decode("read", arrow__read(to_json(\%req)))
+    @{ $res->{rows} }
 }
 
-# Streaming variant: callback fires once per row; no buffering.
+# Callback fires per row. The cdylib returns all rows in one call.
 fn Arrow::read_stream ($path, %opts) {
-    die "Arrow::read_stream: file `$path` not found" unless -e $path
+    die "Arrow::read_stream: callback => sub { … } required" unless defined $opts{callback}
     my $cb = $opts{callback}
-    die "Arrow::read_stream: callback => sub { … } is required" unless defined $cb
-    my $cmd = Arrow::_cmd("read", $path, \%opts)
-    my $count = 0
-    open my $fh, "-|", $cmd or die "Arrow::read_stream: failed to spawn helper: $!"
-    while (my $line = <$fh>) {
-        chomp $line
-        next if $line eq ""
-        $cb->(from_json $line)
-        $count++
+    my @rows = Arrow::_read_impl($path, \%opts)
+    my $n = 0
+    for my $row (@rows) {
+        $cb->($row)
+        $n++
     }
-    close $fh or die "Arrow::read_stream: helper exited non-zero ($?)"
-    $count
+    $n
 }
 
 fn Arrow::read_columnar ($path, %opts) {
@@ -166,23 +65,25 @@ fn Arrow::read_columnar ($path, %opts) {
 }
 
 fn Arrow::_read_columnar_impl ($path, $o) {
-    die "Arrow::read_columnar: file `$path` not found" unless -e $path
-    my $cmd = Arrow::_cmd("read-columnar", $path, $o)
-    my $json = qx{$cmd}
-    die "Arrow::read_columnar: helper exited non-zero ($?)" if $? != 0
-    from_json $json
+    my %req = (
+        path => $path,
+        format => $o->{format},
+        columns => $o->{columns},
+        limit => $o->{limit},
+        skip => $o->{skip},
+    )
+    Arrow::_decode("read_columnar", arrow__read_columnar(to_json(\%req)))
 }
+
+# ── schema + stats ───────────────────────────────────────────────────
 
 fn Arrow::schema ($path, %opts) {
     Arrow::_schema_impl($path, \%opts)
 }
 
 fn Arrow::_schema_impl ($path, $o) {
-    die "Arrow::schema: file `$path` not found" unless -e $path
-    my $cmd = Arrow::_cmd("schema", $path, $o)
-    my $json = qx{$cmd}
-    die "Arrow::schema: helper exited non-zero ($?)" if $? != 0
-    from_json $json
+    my %req = (path => $path, format => $o->{format})
+    Arrow::_decode("schema", arrow__schema(to_json(\%req)))
 }
 
 fn Arrow::stats ($path, %opts) {
@@ -190,84 +91,56 @@ fn Arrow::stats ($path, %opts) {
 }
 
 fn Arrow::_stats_impl ($path, $o) {
-    die "Arrow::stats: file `$path` not found" unless -e $path
-    my $cmd = Arrow::_cmd("stats", $path, $o)
-    my $json = qx{$cmd}
-    die "Arrow::stats: helper exited non-zero ($?)" if $? != 0
-    from_json $json
+    my %req = (path => $path, format => $o->{format})
+    Arrow::_decode("stats", arrow__stats(to_json(\%req)))
 }
 
 fn Arrow::row_count ($path, %opts) {
-    my $s = Arrow::_stats_impl($path, \%opts)
-    $s->{num_rows}
+    my $o = Arrow::stats($path, %opts)
+    $o->{num_rows}
 }
 
-# ---------------------------------------------------------------------------
-# Write paths
-# ---------------------------------------------------------------------------
+# ── write ────────────────────────────────────────────────────────────
 
 fn Arrow::write ($path, $rows, %opts) {
     Arrow::_write_impl($path, $rows, \%opts)
 }
 
 fn Arrow::_write_impl ($path, $rows, $o) {
-    my $arr = ref($rows) eq "ARRAY" ? $rows : [$rows]
-    die "Arrow::write: empty rows (need at least one for schema inference)"
-        if @$arr == 0 && !defined $o->{schema}
-    my $cmd = Arrow::_cmd("write", $path, $o)
-    open my $fh, "|-", $cmd or die "Arrow::write: failed to spawn helper: $!"
-    for my $row (@$arr) {
-        print $fh to_json($row) . "\n"
-    }
-    close $fh or die "Arrow::write: helper exited non-zero ($?)"
-    scalar @$arr
+    die "Arrow::write: rows must be arrayref" unless ref($rows) eq "ARRAY"
+    my %req = (
+        path => $path,
+        rows => $rows,
+        format => $o->{format},
+        compression => $o->{compression},
+        row_group => $o->{row_group},
+    )
+    Arrow::_decode("write", arrow__write(to_json(\%req)))
 }
 
-# Iterator form: subref returns one row per call, undef to stop. Streams.
+# Streaming write: $iter is a coderef returning a row at a time (undef = EOF).
+# We buffer + write in one shot; the in-process FFI removes the per-row
+# pipe-flush latency the v1 helper paid for incremental writes.
 fn Arrow::write_iter ($path, $iter, %opts) {
-    die "Arrow::write_iter: iter must be a code ref" unless ref($iter) eq "CODE"
-    my $cmd = Arrow::_cmd("write", $path, \%opts)
-    open my $fh, "|-", $cmd or die "Arrow::write_iter: failed to spawn helper: $!"
-    my $count = 0
-    while (defined(my $row = $iter->())) {
-        print $fh to_json($row) . "\n"
-        $count++
+    my @rows
+    while (defined (my $row = $iter->())) {
+        push @rows, $row
     }
-    close $fh or die "Arrow::write_iter: helper exited non-zero ($?)"
-    $count
+    Arrow::_write_impl($path, \@rows, \%opts)
 }
 
-# ---------------------------------------------------------------------------
-# Convert
-# ---------------------------------------------------------------------------
+# ── convert ──────────────────────────────────────────────────────────
 
 fn Arrow::convert ($src, $dst, %opts) {
-    die "Arrow::convert: src `$src` not found" unless -e $src
-    my $bin = Arrow::helper_path()
-    my @parts = (Arrow::_shq($bin), "convert", Arrow::_shq($src), Arrow::_shq($dst))
-    if (defined $opts{src_format}) {
-        push @parts, "--src-format", Arrow::_shq($opts{src_format})
-    }
-    if (defined $opts{dst_format}) {
-        push @parts, "--dst-format", Arrow::_shq($opts{dst_format})
-    }
-    if (defined $opts{compression}) {
-        push @parts, "--compression", Arrow::_shq($opts{compression})
-    }
-    if (defined $opts{row_group}) {
-        push @parts, "--row-group", Arrow::_shq($opts{row_group})
-    }
-    my $cmd = join " ", @parts
-    my $rc = system $cmd
-    die "Arrow::convert: helper exited non-zero ($rc)" if $rc != 0
-    $dst
-}
-
-fn Arrow::version {
-    my $bin = Arrow::_shq(Arrow::helper_path())
-    my $v = qx{$bin --version 2>&1}
-    chomp $v
-    $v
+    my %req = (
+        src => $src,
+        dst => $dst,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("convert", arrow__convert(to_json(\%req)))
 }
 
 1

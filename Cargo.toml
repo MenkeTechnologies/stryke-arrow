@@ -1,17 +1,18 @@
 [package]
-name = "stryke-arrow-helper"
-version = "0.1.1"
+name = "stryke-arrow"
+version = "0.2.0"
 edition = "2021"
-description = "Apache Arrow / Parquet / IPC / CSV / JSON bridge binary for the stryke `arrow` package"
+description = "Apache Arrow / Parquet / IPC / CSV / JSON cdylib for the stryke `arrow` package — dlopened in-process via stryke's FFI bridge."
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-arrow"
 homepage = "https://menketechnologies.github.io/stryke-arrow/"
 publish = false
 
-[[bin]]
-name = "stryke-arrow-helper"
-path = "src/main.rs"
+[lib]
+name = "stryke_arrow"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
 
 [dependencies]
 arrow = "58"
@@ -29,10 +30,10 @@ parquet = { version = "58", default-features = false, features = [
     "zstd",
     "base64",
 ] }
-clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+once_cell = "1"
 
 [profile.release]
 opt-level = 3

@@ -1,15 +1,24 @@
 [package]
 name = "arrow"
-version = "0.1.0"
-description = "Apache Arrow + Parquet + IPC + Feather + arrow-CSV/JSON for stryke. Opt-in package tier; keeps the stryke core binary slim."
+version = "0.2.0"
+description = "Apache Arrow / Parquet / IPC / Feather / CSV / JSON cdylib for stryke. Dlopened in-process via stryke's FFI bridge — replaces the v1 helper-binary fork-per-call model."
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-arrow"
 edition = "2026"
 
-[bin]
-arrow = "bin/arrow.stk"
-arrow-build = "bin/arrow-build.stk"
+[ffi]
+lib-name = "stryke_arrow"
+namespace = "Arrow"
+exports = [
+    "arrow__version",
+    "arrow__read",
+    "arrow__read_columnar",
+    "arrow__schema",
+    "arrow__stats",
+    "arrow__write",
+    "arrow__convert",
+]
 
 [scripts]
 build = "cargo build --release"

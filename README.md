@@ -27,9 +27,9 @@ Apache Arrow + Parquet + Arrow IPC + Feather + arrow-CSV + arrow-JSON for stryke
 - [\[0x00\] Why a Package, Not a Builtin](#0x00-why-a-package-not-a-builtin)
 - [\[0x01\] Install](#0x01-install)
 - [\[0x02\] Quick Start](#0x02-quick-start)
-- [\[0x03\] CLI: `arrow`](#0x03-cli-arrow)
+- [\[0x03\] Options](#0x03-options)
 - [\[0x04\] API Reference](#0x04-api-reference)
-- [\[0x05\] Helper Protocol](#0x05-helper-protocol)
+- [\[0x05\] FFI Layer](#0x05-ffi-layer)
 - [\[0x06\] Supported Formats](#0x06-supported-formats)
 - [\[0x07\] Compression](#0x07-compression)
 - [\[0x08\] Discovery](#0x08-discovery)
@@ -58,22 +58,29 @@ is loaded on demand. Core stryke is never linked against arrow.
 
 ## [0x01] Install
 
+From a release (no rustc on the consumer machine):
+
 ```sh
-cd ~/projects/stryke-arrow
-cargo build --release           # produces target/release/stryke-arrow-helper
-s pkg install -g .              # installs the `arrow` and `arrow-build` CLIs
+s pkg install -g github.com/MenkeTechnologies/stryke-arrow
 ```
 
-Or the one-liner:
+From a local checkout (publisher / contributor workflow):
+
+```sh
+cd ~/projects/stryke-arrow
+cargo build --release           # produces target/release/libstryke_arrow.{dylib,so}
+s pkg install -g .              # installs into ~/.stryke/store/arrow@<version>/
+```
+
+Or:
 
 ```sh
 make install
 ```
 
-After install, `arrow --help` works from anywhere on PATH (assuming
-`~/.stryke/bin/` is on PATH). The stryke library is auto-discoverable to any
-project that depends on the package via `[deps] arrow = { path = "..." }`
-or, when published, by name.
+The cdylib is dlopened in-process on first `use Arrow` (stryke's FFI
+bridge resolves the symbols at module load — no helper binary, no
+subprocess fork per call).
 
 ## [0x02] Quick Start
 
@@ -130,18 +137,35 @@ my $df = Arrow::DataFrame::load("sales.parquet")
 # { col => [vals] } columnar hash.
 ```
 
-## [0x03] CLI: `arrow`
+## [0x03] Options
 
-```sh
-arrow read    sales.parquet --columns=id,amount --limit=10
-arrow head    sales.parquet 5
-arrow schema  sales.parquet
-arrow stats   sales.parquet
-arrow rows    sales.parquet
-arrow convert in.csv out.parquet --compression=zstd
-arrow build                                  # build the helper via cargo
-arrow version
+Every `Arrow::*` op accepts `%opts`. Read fields:
+
 ```
+format       → parquet|ipc|arrow|feather|csv|tsv|json|ndjson  (default: extension-detected)
+columns      → \@names  — projection at the source format
+limit        → max rows
+skip         → rows to skip from the start
+batch_size   → reader batch size (default 8192)
+```
+
+Write fields:
+
+```
+format       → as above
+compression  → snappy|gzip|zstd|lz4|brotli|none  (parquet only; default snappy)
+row_group    → max rows per parquet row group (default 65536)
+```
+
+Convert fields:
+
+```
+src_format, dst_format, compression, row_group
+```
+
+Sublibraries (`Arrow::Parquet`, `Arrow::IPC`, `Arrow::Feather`, `Arrow::CSV`,
+`Arrow::JSON`, `Arrow::DataFrame`) pin `format` automatically — see
+`lib/Parquet.stk` etc.
 
 ## [0x04] API Reference
 
@@ -180,30 +204,29 @@ Server-side reader-to-writer pipeline. Options: `src_format`, `dst_format`,
 `compression`, `row_group`. Doesn't round-trip data through the stryke
 process.
 
-### `Arrow::helper_path() → $path`
-Returns the path to `stryke-arrow-helper`. Honors `$ENV{STRYKE_ARROW_HELPER}`.
-
-### `Arrow::ensure_built() → $path`
-Builds the helper via `cargo build --release` if missing.
-
 ### `Arrow::version() → $string`
-Helper version string.
+The cdylib's package version (`env!("CARGO_PKG_VERSION")`).
 
-## [0x05] Helper Protocol
+## [0x05] FFI Layer
 
-The helper speaks NDJSON over stdin/stdout. Useful if you want to skip
-stryke entirely:
+Each `Arrow::*` wrapper builds a JSON args dict and calls a sibling
+`arrow__*` symbol resolved out of `libstryke_arrow.{dylib,so}`. The cdylib
+is dlopened in-process on first `use Arrow` (via stryke's
+`pkg::commands::try_load_ffi_for` resolver hook) and exposes 7 entry
+points: `version`, `read`, `read_columnar`, `schema`, `stats`, `write`,
+`convert`.
 
-```sh
-stryke-arrow-helper read   sales.parquet              # NDJSON rows to stdout
-stryke-arrow-helper read-columnar sales.parquet       # one JSON object
-stryke-arrow-helper schema sales.parquet
-stryke-arrow-helper stats  sales.parquet
-stryke-arrow-helper write  out.parquet < rows.ndjson  # NDJSON rows from stdin
-stryke-arrow-helper convert in.csv out.parquet --compression=zstd
-```
+Wire shape (cdylib responses):
 
-Format is detected from the file extension; pass `--format` to override.
+* `read` → `{"columns": [...], "rows": [{col: val, ...}, ...]}`
+* `read_columnar` → `{"columns": [...], "num_rows": N, "data": {col: [...]}}`
+* `schema` → `{"fields": [{name, type, nullable}, ...]}`
+* `stats` (parquet) → `{"num_rows", "num_row_groups", "columns": [{name, null_count, min, max}, ...]}`
+* `write`, `convert` → `{"path": ..., "rows": N}`
+* Errors → `{"error": "<msg>"}` — the wrapper `die`s with it
+
+Stateless package — arrow operations are pure file transforms, no
+process-level cache.
 
 ## [0x06] Supported Formats
 
@@ -228,16 +251,20 @@ Format is detected from the file extension; pass `--format` to override.
 
 ## [0x08] Discovery
 
-The stryke library locates the helper in this order:
+The cdylib lives next to `Arrow.stk` inside the package install dir:
 
-1. `$ENV{STRYKE_ARROW_HELPER}`
-2. `<pkg>/target/release/stryke-arrow-helper`
-3. `<pkg>/target/debug/stryke-arrow-helper`
-4. `<pkg>/bin/stryke-arrow-helper`
-5. `which stryke-arrow-helper`
+```
+~/.stryke/store/arrow@<version>/
+  stryke.toml
+  lib/
+    Arrow.stk
+    libstryke_arrow.{dylib,so}
+```
 
-`<pkg>` is derived from `__FILE__` on the loaded `Arrow.stk`, so it works
-whether the package lives in your source tree or under `~/.stryke/store/`.
+On `use Arrow`, stryke's `pkg::commands::try_load_ffi_for` reads the
+sibling `stryke.toml`, finds the `[ffi]` table, and dlopens the cdylib
+once for the life of the process. No env vars, no PATH probing, no
+helper-binary discovery — the install dir IS the discovery answer.
 
 ## [0x09] Tests
 
@@ -264,9 +291,9 @@ make clean
 ```
 stryke-arrow/
   stryke.toml                  # stryke package manifest
-  Cargo.toml                   # Rust helper crate manifest
+  Cargo.toml                   # cdylib crate manifest
   Makefile                     # convenience targets
-  src/main.rs                  # stryke-arrow-helper binary
+  src/lib.rs                   # cdylib — arrow__* extern "C" exports
   lib/
     Arrow.stk                  # `use Arrow`
     Parquet.stk                # `use Arrow::Parquet`

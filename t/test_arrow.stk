@@ -1,17 +1,18 @@
-# t/test_arrow.stk — round-trip tests against the helper binary.
+# t/test_arrow.stk — round-trip tests against the in-process cdylib.
 #
-# Skips the entire file with a clear note when the helper isn't built yet.
-# Run `cargo build --release` or `make` first.
+# Requires the cdylib to be loaded. Install once with `s pkg install -g .`
+# from the package root so stryke's FFI bridge dlopens
+# lib/libstryke_arrow.{dylib,so} on `use Arrow`.
 
-require "./lib/Arrow.stk"
-require "./lib/Parquet.stk"
-require "./lib/IPC.stk"
-require "./lib/CSV.stk"
-require "./lib/JSON.stk"
+use Arrow
+use Arrow::Parquet
+use Arrow::IPC
+use Arrow::CSV
+use Arrow::JSON
 
-my $have_helper = eval { Arrow::helper_path(); 1 }
-unless ($have_helper) {
-    p "1..0 # SKIP helper not built — run `cargo build --release` first"
+my $have_cdylib = eval { Arrow::version(); 1 }
+unless ($have_cdylib) {
+    p "1..0 # SKIP cdylib not loaded — run `s pkg install -g .` first"
     exit 0
 }
 
