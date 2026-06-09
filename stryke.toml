@@ -1,5 +1,5 @@
 [package]
-name = "arrow"
+name = "stryke-arrow"
 version = "0.2.0"
 description = "Apache Arrow / Parquet / IPC / Feather / CSV / JSON cdylib for stryke. Dlopened in-process via stryke's FFI bridge — replaces the v1 helper-binary fork-per-call model."
 authors = ["MenkeTechnologies"]
