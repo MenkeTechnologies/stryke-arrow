@@ -63,27 +63,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --no-fail-fast
 
-  helper-smoke:
-    name: Helper round-trip
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked
-      - name: Write NDJSON → parquet → read back
-        run: |
-          set -euo pipefail
-          H=./target/release/stryke-arrow-helper
-          printf '{"id":1,"name":"a"}\n{"id":2,"name":"b"}\n' \
-            | $H write /tmp/sa.parquet --format=parquet
-          $H stats  /tmp/sa.parquet | tee /tmp/stats.json
-          test "$(jq -r .num_rows < /tmp/stats.json)" = 2
-          $H read   /tmp/sa.parquet | wc -l | tr -d ' ' | grep -x 2
-          $H schema /tmp/sa.parquet | jq -e '.fields | length == 2'
-          $H convert /tmp/sa.parquet /tmp/sa.csv
-          test -s /tmp/sa.csv
-
   doc:
     name: Doc
     runs-on: ubuntu-latest
@@ -97,7 +76,7 @@ jobs:
 
   release-build:
     name: Release Build (${{ matrix.target }})
-    needs: [check, test, helper-smoke]
+    needs: [check, test]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -119,7 +98,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: stryke-arrow-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/stryke-arrow-helper
+          path: target/${{ matrix.target }}/release/libstryke_arrow.*
 
   docs-gates:
     name: Docs gates
