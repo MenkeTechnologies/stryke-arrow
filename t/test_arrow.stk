@@ -14,7 +14,7 @@ use Arrow::JSON
 # ── cdylib reachability ──────────────────────────────────────────────
 val $version = Arrow::version()
 assert_ok $version, "Arrow::version returns truthy (cdylib loaded)"
-assert_match $version, qr/^\d+/, "Arrow::version starts with a digit"
+assert_match qr/^\d+/, $version, "Arrow::version starts with a digit"
 
 # ── round-trip dataset ───────────────────────────────────────────────
 # Tiny dataset that exercises ints, floats, strings, nulls.
@@ -28,7 +28,7 @@ val @rows = (
 val $tmp = "/tmp/stryke-arrow-test-$$"
 mkdir $tmp unless -d $tmp
 
-val @formats = (
+var @formats = (
     { name => "parquet", file => "$tmp/x.parquet" },
     { name => "ipc",     file => "$tmp/x.arrow"   },
     { name => "csv",     file => "$tmp/x.csv"     },
@@ -50,7 +50,7 @@ for val $t (@formats) {
 
     val $stats = Arrow::stats($path)
     assert_eq $stats->{num_rows}, 4, "$name: stats.num_rows == 4"
-    assert_eq $stats->{num_columns}, 4, "$name: stats.num_columns == 4"
+    assert_eq scalar(@{$stats->{columns}}), 4, "$name: stats.columns has 4 entries"
 }
 
 # ── parquet-specific: schema shape ───────────────────────────────────
@@ -61,13 +61,13 @@ assert_eq scalar(@{ $sch->{fields} }), 4, "parquet schema has 4 fields"
 # ── columnar read ────────────────────────────────────────────────────
 val $cw = Arrow::read_columnar("$tmp/x.parquet")
 assert_eq $cw->{num_rows}, 4, "parquet columnar: 4 rows"
-assert_eq ref($cw->{columns}), "HASH", "parquet columnar.columns is hash"
-assert_ok exists $cw->{columns}{id}, "parquet columnar has id column"
+assert_eq ref($cw->{data}), "HASH", "parquet columnar.data is hash"
+assert_ok exists $cw->{data}{id}, "parquet columnar has id column in data"
 
 # ── format conversion: parquet → csv ─────────────────────────────────
 Arrow::convert("$tmp/x.parquet", "$tmp/conv.csv")
 assert_ok -e "$tmp/conv.csv", "convert parquet→csv produces file"
-assert_gt -s "$tmp/conv.csv", 0, "convert parquet→csv file is non-empty"
+assert_gt(-s("$tmp/conv.csv"), 0, "convert parquet→csv file is non-empty")
 
 # ── column projection ────────────────────────────────────────────────
 val @proj = Arrow::read("$tmp/x.parquet", columns => ["id", "name"])
