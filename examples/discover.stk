@@ -1,0 +1,51 @@
+#!/usr/bin/env stryke
+# examples/discover.stk — minimum-viable tour of the `Arrow` package.
+#
+# Self-contained: synthesizes a 4-row dataset, round-trips it through
+# parquet + CSV + JSON, inspects schema + row count, then deletes the
+# temp files. No external file argument, no service. Runs end-to-end
+# in CI in <1s.
+#
+# Run:   s examples/discover.stk
+
+use Arrow
+use Arrow::Parquet
+use Arrow::CSV
+use Arrow::JSON
+
+p "=== Arrow discover ==="
+p "version: " . Arrow::version()
+p ""
+
+val @rows = (
+    { id => 1, name => "alice",   score => 1.5 },
+    { id => 2, name => "bob",     score => 2.0 },
+    { id => 3, name => "charlie", score => 3.25 },
+    { id => 4, name => "dana",    score => 4.0 },
+)
+
+val $base = "/tmp/stryke-arrow-discover-$$"
+mkdir $base unless -d $base
+
+# Round-trip through each shipping format.
+for val $fmt (qw(parquet csv json)) {
+    val $path = "$base/data.$fmt"
+    Arrow::write($path, \@rows)
+    val @back = Arrow::read($path)
+    val $sch  = Arrow::schema($path)
+    val $n    = Arrow::row_count($path)
+    p sprintf("  %-7s wrote %d rows, read back %d, schema has %d field(s)",
+              $fmt, scalar(@rows), scalar(@back), scalar(@{ $sch->{fields} }))
+}
+
+# Cleanup.
+opendir(my $dh, $base)
+while (my $f = readdir($dh)) {
+    next if $f eq "." || $f eq ".."
+    unlink "$base/$f"
+}
+closedir($dh)
+rmdir $base
+
+p ""
+p "files cleaned: $base"
