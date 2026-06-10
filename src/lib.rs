@@ -768,4 +768,173 @@ mod tests {
         let err = column_indices(&schema, &names).unwrap_err().to_string();
         assert!(err.contains("bogus"), "{err}");
     }
+
+    // ── op_read skip / limit boundary coverage ────────────────────────────────
+    //
+    // The skip/limit machinery in `op_read` (lib.rs:243-268) is the trickiest
+    // arithmetic in the file: it tracks `skipped`, `emitted`, and `remaining`
+    // across batches and slices batches in-place when boundaries straddle.
+    // The block has six interacting branches (skip>=n vs skip<n; remaining==0;
+    // batch.num_rows()>remaining; final `emitted>=limit` break). Refactors here
+    // are the most likely future regression: off-by-one on the `to_skip == n`
+    // edge, `saturating_sub` swap, or moving the `break` past the slice can
+    // each silently corrupt downstream callers. Inline-mod tests because all
+    // `op_*` fns are private (crate-type = cdylib, no rlib).
+
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn unique_csv(prefix: &str, body: &str) -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!(
+            "stryke_arrow_test_{}_{}_{}.csv",
+            prefix,
+            std::process::id(),
+            n
+        ));
+        let mut f = File::create(&p).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        p
+    }
+
+    #[test]
+    fn op_read_skip_equal_to_total_returns_zero_rows() {
+        // skip == total: every batch is fully consumed by the skip clause
+        // (lib.rs:249 `continue`) and zero rows reach the writer. A regression
+        // that mishandled `to_skip == n` (e.g., dropped the `continue` and let
+        // the empty-slice path run) would emit a degenerate batch or panic.
+        let path = unique_csv("skip_eq_total", "id,name\n1,a\n2,b\n3,c\n");
+        let args = json!({
+            "path": path.to_str().unwrap(),
+            "format": "csv",
+            "skip": 3,
+            "batch_size": 2,
+        });
+        let r = op_read(args).unwrap();
+        let rows = r["rows"].as_array().unwrap();
+        assert!(
+            rows.is_empty(),
+            "skip == total should yield no rows, got {rows:?}"
+        );
+        // Schema names still surface even when no rows pass.
+        let cols = r["columns"].as_array().unwrap();
+        assert_eq!(cols.len(), 2, "columns should reflect schema not row count");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn op_read_limit_zero_returns_zero_rows_not_all() {
+        // `limit: 0` is JSON-distinguishable from absent limit. The
+        // `remaining == 0` early break (lib.rs:257) must fire on the very
+        // first iteration. If a refactor changed the branch to
+        // `remaining < 1` *after* slicing, or moved `emitted >= l` ahead of
+        // the write, the file's entire row set would leak through as if
+        // limit was unset. This is exactly the kind of zero-vs-unset
+        // boundary that vibe-coded refactors flatten.
+        let path = unique_csv("limit_zero", "id\n1\n2\n3\n4\n5\n");
+        let args = json!({
+            "path": path.to_str().unwrap(),
+            "format": "csv",
+            "limit": 0,
+        });
+        let r = op_read(args).unwrap();
+        assert_eq!(
+            r["rows"].as_array().unwrap().len(),
+            0,
+            "limit: 0 must NOT degenerate into 'no limit'"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn op_read_skip_straddles_batch_then_limit_caps_inside_next_batch() {
+        // Exercises the *both* clauses firing on different batches plus an
+        // intra-batch slice. Setup: 6 rows, batch_size=2, skip=3, limit=2.
+        // Batch1 (rows 1-2): fully skipped via `to_skip == n` continue.
+        // Batch2 (rows 3-4): partial skip via `batch.slice(to_skip, n - to_skip)`
+        //   leaves row 4; then the `batch.num_rows() > remaining` branch is
+        //   not hit (1 <= 2); emitted=1.
+        // Batch3 (rows 5-6): no skip; `batch.num_rows() > remaining` triggers
+        //   `batch.slice(0, 1)` keeping only row 5; emitted=2; final break.
+        // Expected rows: id=4, id=5. Any miscalculation of `to_skip - skipped`,
+        // `remaining`, or the slice arguments rearranges these two rows.
+        let path = unique_csv(
+            "skip_limit_straddle",
+            "id\n1\n2\n3\n4\n5\n6\n",
+        );
+        let args = json!({
+            "path": path.to_str().unwrap(),
+            "format": "csv",
+            "skip": 3,
+            "limit": 2,
+            "batch_size": 2,
+        });
+        let r = op_read(args).unwrap();
+        let rows = r["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "expected exactly 2 rows after skip=3 limit=2");
+        // CSV schema-infer makes id an Int64. Compare via i64.
+        let ids: Vec<i64> = rows
+            .iter()
+            .map(|r| r["id"].as_i64().expect("id should parse as int"))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![4, 5],
+            "skip=3 limit=2 over [1..=6] must return ids [4,5], got {ids:?}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn op_read_columnar_missing_row_keys_become_null_not_misaligned() {
+        // op_read_columnar pivots row-records into column arrays
+        // (lib.rs:289-298). The bug class this catches: a refactor that
+        // pushed `obj.get(n)` results conditionally (e.g., `if let Some(v) =
+        // obj.get(n) { arr.push(v) }`) would silently drop missing values,
+        // making column arrays shorter than `num_rows` and misaligning *all*
+        // downstream consumers row-by-row. The current code uses
+        // `unwrap_or(Value::Null)` — this test pins that invariant.
+        //
+        // We use a CSV where some cells are empty so arrow emits null for
+        // missing values, then verify every column has length == num_rows.
+        // CSV null inference via empty cell:
+        let path = unique_csv(
+            "columnar_align",
+            "id,name,score\n1,alice,10\n2,,20\n3,carol,\n",
+        );
+        let args = json!({
+            "path": path.to_str().unwrap(),
+            "format": "csv",
+        });
+        let r = op_read_columnar(args).unwrap();
+        let num_rows = r["num_rows"].as_u64().unwrap();
+        assert_eq!(num_rows, 3, "should report 3 rows");
+        let data = r["data"].as_object().unwrap();
+        // Invariant: every column array has length == num_rows. A drop-on-
+        // missing regression would shrink the `name` or `score` column.
+        for col_name in ["id", "name", "score"] {
+            let col = data
+                .get(col_name)
+                .unwrap_or_else(|| panic!("column `{col_name}` missing from data map"));
+            let arr = col
+                .as_array()
+                .unwrap_or_else(|| panic!("column `{col_name}` not an array"));
+            assert_eq!(
+                arr.len() as u64, num_rows,
+                "column `{col_name}` length {} != num_rows {} — alignment broken",
+                arr.len(),
+                num_rows
+            );
+        }
+        // Spot check: row 2 (idx 1) has empty name → null in name column.
+        // CSV reader emits null for empty cells with nullable inferred fields.
+        let name_col = data["name"].as_array().unwrap();
+        assert!(
+            name_col[1].is_null(),
+            "row 2 empty name cell should pivot to null in column array, got {:?}",
+            name_col[1]
+        );
+        let _ = std::fs::remove_file(path);
+    }
 }
