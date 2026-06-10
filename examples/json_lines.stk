@@ -1,0 +1,48 @@
+#!/usr/bin/env stryke
+# examples/json_lines.stk — NDJSON-style record stream → schema introspection.
+#
+# Reads NDJSON (one JSON object per line — a common log/event format),
+# writes it through Arrow as parquet, then prints the inferred schema.
+# Self-contained: synthesizes 50 records, runs in <1s with no input file.
+#
+# Run:   s examples/json_lines.stk
+
+use Arrow
+use Arrow::JSON
+
+p "=== Arrow json_lines tour ==="
+
+# Build 50 records mimicking what `journalctl -o json` or `kubectl logs --json`
+# would emit. Mixed types: int, string, hash-valued tags.
+var @records
+for (var $i = 0; $i < 50; $i++) {
+    push @records, {
+        ts      => 1700000000 + $i,
+        level   => $i % 5 == 0 ? "error" : ($i % 3 == 0 ? "warn" : "info"),
+        message => "event-$i from synthetic stream",
+        host    => "node-" . ($i % 3),
+    }
+}
+
+val $tmp_json = "/tmp/stryke-arrow-jsonlines-$$.ndjson"
+val $tmp_pq   = "/tmp/stryke-arrow-jsonlines-$$.parquet"
+
+Arrow::JSON::write($tmp_json, \@records)
+p "wrote NDJSON: $tmp_json (" . scalar(@records) . " records)"
+
+# Re-read via Arrow::JSON, then write as parquet to demonstrate format crossing.
+val @back = Arrow::JSON::read($tmp_json)
+Arrow::write($tmp_pq, \@back)
+val $sch = Arrow::schema($tmp_pq)
+val $n   = Arrow::row_count($tmp_pq)
+
+p "round-tripped to parquet: $tmp_pq"
+p "rows: $n"
+p "inferred schema (" . scalar(@{ $sch->{fields} }) . " field(s)):"
+for val $f (@{ $sch->{fields} }) {
+    p "  - $f->{name}: $f->{type}"
+}
+
+unlink $tmp_json
+unlink $tmp_pq
+p "cleaned up tempfiles"
