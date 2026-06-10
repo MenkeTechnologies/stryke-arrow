@@ -879,10 +879,7 @@ mod tests {
         //   `batch.slice(0, 1)` keeping only row 5; emitted=2; final break.
         // Expected rows: id=4, id=5. Any miscalculation of `to_skip - skipped`,
         // `remaining`, or the slice arguments rearranges these two rows.
-        let path = unique_csv(
-            "skip_limit_straddle",
-            "id\n1\n2\n3\n4\n5\n6\n",
-        );
+        let path = unique_csv("skip_limit_straddle", "id\n1\n2\n3\n4\n5\n6\n");
         let args = json!({
             "path": path.to_str().unwrap(),
             "format": "csv",
@@ -892,7 +889,11 @@ mod tests {
         });
         let r = op_read(args).unwrap();
         let rows = r["rows"].as_array().unwrap();
-        assert_eq!(rows.len(), 2, "expected exactly 2 rows after skip=3 limit=2");
+        assert_eq!(
+            rows.len(),
+            2,
+            "expected exactly 2 rows after skip=3 limit=2"
+        );
         // CSV schema-infer makes id an Int64. Compare via i64.
         let ids: Vec<i64> = rows
             .iter()
@@ -941,7 +942,8 @@ mod tests {
                 .as_array()
                 .unwrap_or_else(|| panic!("column `{col_name}` not an array"));
             assert_eq!(
-                arr.len() as u64, num_rows,
+                arr.len() as u64,
+                num_rows,
                 "column `{col_name}` length {} != num_rows {} — alignment broken",
                 arr.len(),
                 num_rows
