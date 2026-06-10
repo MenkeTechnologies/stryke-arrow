@@ -17,7 +17,7 @@ p "rows:   " . Arrow::row_count($path)
 
 # Stream a first-100-row preview without buffering the whole file.
 p "--- first 100 rows ---"
-var $n = 0
+mysync $n = 0
 Arrow::read_stream($path,
     limit    => 100,
     callback => sub ($row) {

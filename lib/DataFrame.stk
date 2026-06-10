@@ -40,7 +40,7 @@ fn Arrow::DataFrame::_df_to_rows ($df) {
     return [] if @names == 0
     val $n = len @{ $cols{$names[0]} }
     var @rows
-    for (val $i = 0; $i < $n; $i++) {
+    for (var $i = 0; $i < $n; $i++) {
         var %row
         for val $name (@names) {
             $row{$name} = $cols{$name}[$i]
