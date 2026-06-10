@@ -1,0 +1,87 @@
+## t/test_stryke_arrow_surface.stk — wrapper-completeness pin.
+##
+## Asserts every public `fn X::Y::name` declared in lib/*.stk is
+## reachable via `use` at runtime. Uses `exists &X::Y::name` to
+## probe the symbol table without invoking the sub.
+##
+## Catches:
+##   * a wrapper sub deleted from lib/ but still referenced elsewhere
+##   * a sub-package file dropped from the install layout
+##   * `use Foo::Bar` failing to chase into lib/Bar.stk
+##   * an installed-package entry whose namespace bridge is broken
+##
+## Permission-free — no service, no creds, no live daemon. Private
+## helpers (`_` prefix) are implementation detail and are NOT
+## asserted, so refactoring internals stays free.
+
+use Arrow
+use Arrow::CSV
+use Arrow::DataFrame
+use Arrow::Feather
+use Arrow::IPC
+use Arrow::JSON
+use Arrow::Parquet
+
+# ── Arrow.stk ──────────────────────────────────────────────
+assert_ok exists &Arrow::version, "Arrow::version exists"
+assert_ok exists &Arrow::read, "Arrow::read exists"
+assert_ok exists &Arrow::read_stream, "Arrow::read_stream exists"
+assert_ok exists &Arrow::read_columnar, "Arrow::read_columnar exists"
+assert_ok exists &Arrow::schema, "Arrow::schema exists"
+assert_ok exists &Arrow::stats, "Arrow::stats exists"
+assert_ok exists &Arrow::row_count, "Arrow::row_count exists"
+assert_ok exists &Arrow::write, "Arrow::write exists"
+assert_ok exists &Arrow::write_iter, "Arrow::write_iter exists"
+assert_ok exists &Arrow::convert, "Arrow::convert exists"
+
+# ── CSV.stk ──────────────────────────────────────────────
+assert_ok exists &Arrow::CSV::read, "Arrow::CSV::read exists"
+assert_ok exists &Arrow::CSV::read_stream, "Arrow::CSV::read_stream exists"
+assert_ok exists &Arrow::CSV::read_columnar, "Arrow::CSV::read_columnar exists"
+assert_ok exists &Arrow::CSV::write, "Arrow::CSV::write exists"
+assert_ok exists &Arrow::CSV::write_iter, "Arrow::CSV::write_iter exists"
+assert_ok exists &Arrow::CSV::schema, "Arrow::CSV::schema exists"
+assert_ok exists &Arrow::CSV::stats, "Arrow::CSV::stats exists"
+
+# ── DataFrame.stk ──────────────────────────────────────────────
+assert_ok exists &Arrow::DataFrame::load, "Arrow::DataFrame::load exists"
+assert_ok exists &Arrow::DataFrame::dump, "Arrow::DataFrame::dump exists"
+
+# ── Feather.stk ──────────────────────────────────────────────
+assert_ok exists &Arrow::Feather::read, "Arrow::Feather::read exists"
+assert_ok exists &Arrow::Feather::read_stream, "Arrow::Feather::read_stream exists"
+assert_ok exists &Arrow::Feather::read_columnar, "Arrow::Feather::read_columnar exists"
+assert_ok exists &Arrow::Feather::write, "Arrow::Feather::write exists"
+assert_ok exists &Arrow::Feather::write_iter, "Arrow::Feather::write_iter exists"
+assert_ok exists &Arrow::Feather::schema, "Arrow::Feather::schema exists"
+assert_ok exists &Arrow::Feather::stats, "Arrow::Feather::stats exists"
+
+# ── IPC.stk ──────────────────────────────────────────────
+assert_ok exists &Arrow::IPC::read, "Arrow::IPC::read exists"
+assert_ok exists &Arrow::IPC::read_stream, "Arrow::IPC::read_stream exists"
+assert_ok exists &Arrow::IPC::read_columnar, "Arrow::IPC::read_columnar exists"
+assert_ok exists &Arrow::IPC::write, "Arrow::IPC::write exists"
+assert_ok exists &Arrow::IPC::write_iter, "Arrow::IPC::write_iter exists"
+assert_ok exists &Arrow::IPC::schema, "Arrow::IPC::schema exists"
+assert_ok exists &Arrow::IPC::stats, "Arrow::IPC::stats exists"
+
+# ── JSON.stk ──────────────────────────────────────────────
+assert_ok exists &Arrow::JSON::read, "Arrow::JSON::read exists"
+assert_ok exists &Arrow::JSON::read_stream, "Arrow::JSON::read_stream exists"
+assert_ok exists &Arrow::JSON::read_columnar, "Arrow::JSON::read_columnar exists"
+assert_ok exists &Arrow::JSON::write, "Arrow::JSON::write exists"
+assert_ok exists &Arrow::JSON::write_iter, "Arrow::JSON::write_iter exists"
+assert_ok exists &Arrow::JSON::schema, "Arrow::JSON::schema exists"
+assert_ok exists &Arrow::JSON::stats, "Arrow::JSON::stats exists"
+
+# ── Parquet.stk ──────────────────────────────────────────────
+assert_ok exists &Arrow::Parquet::read, "Arrow::Parquet::read exists"
+assert_ok exists &Arrow::Parquet::read_stream, "Arrow::Parquet::read_stream exists"
+assert_ok exists &Arrow::Parquet::read_columnar, "Arrow::Parquet::read_columnar exists"
+assert_ok exists &Arrow::Parquet::write, "Arrow::Parquet::write exists"
+assert_ok exists &Arrow::Parquet::write_iter, "Arrow::Parquet::write_iter exists"
+assert_ok exists &Arrow::Parquet::schema, "Arrow::Parquet::schema exists"
+assert_ok exists &Arrow::Parquet::stats, "Arrow::Parquet::stats exists"
+assert_ok exists &Arrow::Parquet::row_count, "Arrow::Parquet::row_count exists"
+
+test_run
