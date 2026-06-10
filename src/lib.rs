@@ -749,6 +749,26 @@ mod tests {
         assert!(err.contains("lzma"), "{err}");
     }
 
+    /// `parse_columns` must reject non-array JSON input — pin the contract
+    /// so callers passing a string accidentally (`"id,name"` instead of
+    /// `["id", "name"]`) get `None` rather than `Some([])` or a panic.
+    #[test]
+    fn parse_columns_rejects_non_array_inputs() {
+        assert_eq!(parse_columns(&json!("id,name")), None);
+        assert_eq!(parse_columns(&json!(42)), None);
+        assert_eq!(parse_columns(&json!({"cols": ["id"]})), None);
+        assert_eq!(parse_columns(&Value::Null), None);
+    }
+
+    /// Empty array input should be `Some(vec![])`, NOT `None` —
+    /// distinguishing "supplied empty" from "not supplied" matters: empty
+    /// usually means "no projection" downstream, while None means "read all
+    /// columns".
+    #[test]
+    fn parse_columns_empty_array_is_some_not_none() {
+        assert_eq!(parse_columns(&json!([])), Some(vec![]));
+    }
+
     #[test]
     fn column_indices_maps_names_to_positions() {
         let schema: SchemaRef = Arc::new(Schema::new(vec![
