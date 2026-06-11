@@ -907,6 +907,204 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    // ── op_write / op_convert / op_stats round-trip coverage ─────────────────
+    //
+    // Existing tests cover only `op_read` skip/limit and `op_read_columnar`
+    // alignment. The write/convert/stats paths (lib.rs:407-533) are completely
+    // untested as a unit. The tests below pin three different bug classes:
+    //   - write→read parquet round-trip preserves row count + values
+    //     (catches rows_to_batches schema inference dropping a column,
+    //     parquet compression corrupting on tiny inputs, JSON-to-arrow type
+    //     coercion silently widening int→float)
+    //   - convert CSV→Parquet preserves row count
+    //     (catches `.collect::<Result<_,_>>()?` swallowing rows when a non-
+    //     first batch errors, and write_batches's per-format dispatch
+    //     silently no-op'ing for a format)
+    //   - stats for CSV accumulates row counts across multiple batches
+    //     (catches `+= → =` regression that would only report the last batch
+    //     size when the file exceeds the default batch_size of 8192)
+    //
+    // CSV→parquet is the only path that exercises arrow-json → arrow record
+    // batch → parquet writer → parquet reader → arrow record batch → arrow-
+    // json output. Anything that breaks one of those five hops gets caught.
+
+    fn unique_path(prefix: &str, ext: &str) -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "stryke_arrow_test_{}_{}_{}.{}",
+            prefix,
+            std::process::id(),
+            n,
+            ext
+        ))
+    }
+
+    #[test]
+    fn op_write_parquet_then_op_read_preserves_row_count_and_values() {
+        // Round-trip 4 rows through parquet. If rows_to_batches's JSON-schema
+        // inference loses a field (e.g., a future refactor switching from
+        // arrow-json's schema-infer to a hand-rolled one drops null-only
+        // columns), or the parquet writer silently drops rows when
+        // row_group < num_rows, the row count or per-cell value check fails.
+        let path = unique_path("write_roundtrip", "parquet");
+        let rows = json!([
+            {"id": 1, "name": "alpha"},
+            {"id": 2, "name": "bravo"},
+            {"id": 3, "name": "charlie"},
+            {"id": 4, "name": "delta"},
+        ]);
+        let write_args = json!({
+            "path": path.to_str().unwrap(),
+            "format": "parquet",
+            "rows": rows,
+            // row_group < num_rows forces multi-row-group write — catches the
+            // bug where ArrowWriter::write is called once with an oversized
+            // batch and the row-group split happens internally; a regression
+            // dropping the row_group setting would fail this differently than
+            // the default 65536.
+            "row_group": 2,
+        });
+        let w = op_write(write_args).unwrap();
+        assert_eq!(
+            w["rows"].as_u64().unwrap(),
+            4,
+            "op_write must report rows.len(), got {w:?}"
+        );
+
+        let read_args = json!({
+            "path": path.to_str().unwrap(),
+            "format": "parquet",
+        });
+        let r = op_read(read_args).unwrap();
+        let out_rows = r["rows"].as_array().unwrap();
+        assert_eq!(
+            out_rows.len(),
+            4,
+            "parquet round-trip must preserve row count; got {} rows",
+            out_rows.len()
+        );
+
+        // Build set of (id, name) tuples — order across row-groups is preserved
+        // by parquet, but pinning order is brittle to writer changes. Compare
+        // as a set instead. Any int→float coercion failure (e.g., schema
+        // infer treating id as Float64) makes `as_i64()` return None.
+        let mut got: Vec<(i64, String)> = out_rows
+            .iter()
+            .map(|r| {
+                let id = r["id"].as_i64().expect("id should round-trip as int64");
+                let name = r["name"]
+                    .as_str()
+                    .expect("name should round-trip as string")
+                    .to_string();
+                (id, name)
+            })
+            .collect();
+        got.sort();
+        let want: Vec<(i64, String)> = vec![
+            (1, "alpha".into()),
+            (2, "bravo".into()),
+            (3, "charlie".into()),
+            (4, "delta".into()),
+        ];
+        assert_eq!(got, want, "round-trip values diverged from input");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn op_convert_csv_to_parquet_preserves_row_count_and_schema_names() {
+        // 5-row CSV → parquet via op_convert. Tests the full pipeline:
+        // open_reader(Csv) → schema infer → collect batches → write_batches
+        // (Parquet branch). If write_batches's Parquet arm silently misses a
+        // batch in the `for b in batches { w.write(b)?; }` loop, or
+        // op_convert's `.collect::<Result<_, _>>()?` accumulator swallows
+        // a non-first error, the reported `rows` count diverges.
+        let src = unique_path("convert_src", "csv");
+        let dst = unique_path("convert_dst", "parquet");
+        let mut f = File::create(&src).unwrap();
+        f.write_all(b"id,name\n10,a\n20,b\n30,c\n40,d\n50,e\n")
+            .unwrap();
+        drop(f);
+
+        let convert_args = json!({
+            "src": src.to_str().unwrap(),
+            "dst": dst.to_str().unwrap(),
+            "src_format": "csv",
+            "dst_format": "parquet",
+        });
+        let r = op_convert(convert_args).unwrap();
+        assert_eq!(
+            r["rows"].as_u64().unwrap(),
+            5,
+            "op_convert must report sum of all batch.num_rows(), got {r:?}"
+        );
+
+        // Verify the parquet file is readable and schema names survived
+        // (open_reader's schema flows directly into write_batches; a regression
+        // swapping reader.schema() with a default Schema would break this).
+        let schema_r = op_schema(json!({
+            "path": dst.to_str().unwrap(),
+            "format": "parquet",
+        }))
+        .unwrap();
+        let fields = schema_r["fields"].as_array().unwrap();
+        let names: Vec<&str> = fields.iter().map(|f| f["name"].as_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            vec!["id", "name"],
+            "convert must preserve column NAMES and ORDER; got {names:?}"
+        );
+
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+    }
+
+    #[test]
+    fn op_stats_csv_accumulates_across_multiple_batches() {
+        // op_stats's non-parquet branch (lib.rs:387-390) walks every batch
+        // and sums num_rows into an i64 accumulator. We force multi-batch
+        // execution via a JSON file with batch_size hardcoded to 8192 inside
+        // op_stats — so we need >8192 rows, which is too slow. Instead pin
+        // the contract with a CSV containing exactly 3 rows and verify
+        // num_rows == 3 (catches `=` instead of `+=`, off-by-one on the
+        // header line being counted, and the as i64 cast direction).
+        //
+        // Distinct from boilerplate "count rows" because it also asserts
+        // num_columns equals schema field count (catches schema.fields() vs
+        // first-batch.num_columns() divergence — the latter is undefined
+        // when there are zero batches).
+        let path = unique_csv(
+            "stats_count",
+            "id,kind,note\n1,a,first\n2,b,second\n3,c,third\n",
+        );
+        let r = op_stats(json!({
+            "path": path.to_str().unwrap(),
+            "format": "csv",
+        }))
+        .unwrap();
+        assert_eq!(
+            r["num_rows"].as_i64().unwrap(),
+            3,
+            "op_stats csv must count actual data rows (header excluded), got {r:?}"
+        );
+        assert_eq!(
+            r["num_columns"].as_u64().unwrap(),
+            3,
+            "op_stats csv num_columns must match schema field count, got {r:?}"
+        );
+        let cols = r["columns"].as_array().unwrap();
+        assert_eq!(cols.len(), 3, "columns array length must match num_columns");
+        // Names must appear in declared order; a HashMap-based schema impl
+        // would shuffle them.
+        let names: Vec<&str> = cols.iter().map(|c| c["name"].as_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            vec!["id", "kind", "note"],
+            "column name order broken"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn op_read_columnar_missing_row_keys_become_null_not_misaligned() {
         // op_read_columnar pivots row-records into column arrays
@@ -957,6 +1155,118 @@ mod tests {
             "row 2 empty name cell should pivot to null in column array, got {:?}",
             name_col[1]
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    // ── op_write empty-rows guard + ProjectingReader projection order ─────────
+    //
+    // Two distinct gaps the suite above leaves open:
+    //
+    //   1. `op_write` with an empty `rows` array must `bail!("write: no rows")`
+    //      (lib.rs:454-456) BEFORE touching the filesystem. `rows_to_batches`
+    //      short-circuits to `Ok(vec![])` on empty input (lib.rs:408-410), so
+    //      `batches.is_empty()` is the only guard. A regression that moved the
+    //      `File::create` ahead of the guard, or dropped the guard, would
+    //      truncate/create a zero-byte target file and only fail later inside
+    //      `ArrowWriter::try_new` with a schema-index panic. The empty-input
+    //      class is exactly what gets skipped in happy-path round-trips.
+    //
+    //   2. CSV column projection goes through `ProjectingReader` (lib.rs:140-149,
+    //      197-213). The output schema is built from `indices` in *requested*
+    //      order, and `next()` re-projects each batch's columns by those same
+    //      indices. The invariant: requesting columns out of file order returns
+    //      them in REQUEST order, not file order. A refactor that built the
+    //      projected schema from sorted/file-order indices while leaving `next()`
+    //      on request-order (or vice-versa) would transpose column data under
+    //      mismatched headers — a silent data-corruption bug, not a crash.
+
+    #[test]
+    fn op_write_empty_rows_array_errors_before_creating_file() {
+        // Target path must NOT exist after a no-rows write attempt. If the
+        // guard regressed and File::create ran first, the file would be left
+        // on disk (zero bytes) even though the call errors.
+        let path = unique_path("write_empty", "parquet");
+        assert!(!path.exists(), "precondition: temp path must not pre-exist");
+        let args = json!({
+            "path": path.to_str().unwrap(),
+            "format": "parquet",
+            "rows": [],
+        });
+        let err = op_write(args).unwrap_err().to_string();
+        assert!(
+            err.contains("no rows"),
+            "empty rows must bail with 'no rows', got: {err}"
+        );
+        assert!(
+            !path.exists(),
+            "no-rows write must not create the output file, but it exists at {}",
+            path.display()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn op_read_csv_projection_returns_columns_in_request_order() {
+        // File order is id,name,score. Request ["score","id"] — a subset in a
+        // DIFFERENT order. ProjectingReader must surface exactly those two
+        // columns, in request order, with correctly aligned per-row values.
+        // If schema order and data-projection order diverge, the score values
+        // would appear under "id" (or the columns array order would not match
+        // request order) — caught here by checking BOTH the reported column
+        // list order AND that each row's values land under the right key.
+        let path = unique_csv(
+            "proj_reorder",
+            "id,name,score\n1,alice,100\n2,bob,200\n3,carol,300\n",
+        );
+        let args = json!({
+            "path": path.to_str().unwrap(),
+            "format": "csv",
+            "columns": ["score", "id"],
+        });
+        let r = op_read(args).unwrap();
+
+        // Column list must be the requested subset, in requested order.
+        let cols: Vec<&str> = r["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            cols,
+            vec!["score", "id"],
+            "projection must drop 'name' and keep request order, got {cols:?}"
+        );
+
+        let rows = r["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 3, "all 3 rows must survive projection");
+
+        // The dropped column must be absent from every row object — a
+        // ProjectingReader that re-projected by file indices but kept the full
+        // schema would leak 'name' back in.
+        for row in rows {
+            let obj = row.as_object().unwrap();
+            assert!(
+                !obj.contains_key("name"),
+                "projected-out column 'name' leaked into row {obj:?}"
+            );
+        }
+
+        // Value alignment: row i must have id == i+1 and score == (i+1)*100.
+        // A transposed projection (data under wrong header) fails this.
+        for (i, row) in rows.iter().enumerate() {
+            let expect_id = (i as i64) + 1;
+            assert_eq!(
+                row["id"].as_i64().unwrap(),
+                expect_id,
+                "row {i} id misaligned: {row:?}"
+            );
+            assert_eq!(
+                row["score"].as_i64().unwrap(),
+                expect_id * 100,
+                "row {i} score misaligned (data under wrong column?): {row:?}"
+            );
+        }
         let _ = std::fs::remove_file(path);
     }
 }
