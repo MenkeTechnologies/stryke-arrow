@@ -51,10 +51,10 @@ parquet hit a different scale:
 | Core builtins (~40 MB stryke) | small deps, used everywhere | string, math, regex, parallel ops, scipy-class math |
 | Package tier (opt-in) | heavy deps, narrow use cases | parquet, arrow, big-ML, cloud SDKs, niche formats |
 
-`stryke-arrow` ships as a local stryke package + a sidecar Rust binary
-(`stryke-arrow-helper`) built from this repo. The stryke side is a thin
-NDJSON-pipe wrapper; the heavy arrow-rs/parquet code lives in the helper and
-is loaded on demand. Core stryke is never linked against arrow.
+`stryke-arrow` ships as a local stryke package + a Rust cdylib
+(`libstryke_arrow.{dylib,so}`) built from this repo. The stryke side is a
+thin FFI wrapper; the heavy arrow-rs/parquet code lives in the cdylib and
+is dlopened on demand. Core stryke is never linked against arrow.
 
 ## [0x01] Install
 
@@ -304,10 +304,13 @@ stryke-arrow/
     DataFrame.stk              # `use Arrow::DataFrame`
   t/
     test_arrow.stk             # round-trip tests per format
+    test_stryke_arrow_surface.stk  # wrapper-completeness pin
   examples/
-    read_parquet.stk
     csv_to_parquet.stk
     dataframe_bridge.stk
+    discover.stk
+    json_lines.stk
+    read_parquet.stk
 ```
 
 ## [0xFF] License
