@@ -190,6 +190,15 @@ distinct_count, min, max }`.
 ### `Arrow::row_count(PATH, %opts) → $n`
 Shortcut around `stats`.
 
+### `Arrow::column_names(PATH, %opts) → \@names`
+Schema field names in file order — pure-stryke over `schema`.
+
+### `Arrow::column_count(PATH, %opts) → $n`
+Number of columns in the schema.
+
+### `Arrow::is_empty(PATH, %opts) → 1 | 0`
+True when the file has zero data rows (the schema may still be present).
+
 ### `Arrow::write(PATH, \@rows, %opts) → $n`
 Options: `format`, `compression` (parquet only: `snappy|gzip|zstd|lz4|brotli|uncompressed`),
 `row_group`, `schema` (path to a JSON schema spec to skip inference on huge

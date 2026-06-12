@@ -157,3 +157,24 @@ fn Arrow::convert ($src, $dst, %opts) {
     Arrow::_decode("convert", arrow__convert(to_json(\%req)))
 }
 
+
+# ── convenience composites ──────────────────────────────────────────
+#
+# Pure-stryke helpers over schema / row_count — no new FFI. The slurpy
+# %opts (carrying `format`) is forwarded directly as the trailing splat;
+# never copy it to a local or add pairs after it (stryke BUG-306).
+
+## Column names in file order. column_names("data.arrow") → ["id","name",…].
+fn Arrow::column_names ($path, %opts) {
+    [ map { $_->{name} } @{ Arrow::schema($path, %opts)->{fields} } ]
+}
+
+## Number of columns in the file's schema.
+fn Arrow::column_count ($path, %opts) {
+    scalar @{ Arrow::schema($path, %opts)->{fields} }
+}
+
+## True if the file has zero data rows (schema may still be present).
+fn Arrow::is_empty ($path, %opts) {
+    Arrow::row_count($path, %opts) == 0 ? 1 : 0
+}
