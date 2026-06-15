@@ -194,6 +194,22 @@ fn Arrow::select ($src, $dst, $cols, %opts) {
     Arrow::_decode("select", arrow__select(to_json(\%req)))
 }
 
+## Drop columns, keeping the rest in original order — complement of select.
+## $cols is an arrayref of names to remove; each must exist. Returns the
+## surviving column names under `columns`.
+fn Arrow::drop ($src, $dst, $cols, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        columns => $cols,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("drop", arrow__drop(to_json(\%req)))
+}
+
 ## Sort rows. $by is an arrayref of { column => name, descending => bool }.
 fn Arrow::sort ($src, $dst, $by, %opts) {
     val %req = (

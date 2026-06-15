@@ -52,6 +52,14 @@ assert_ok exists $cols[0]->{name}, "select keeps name"
 assert_ok exists $cols[0]->{id}, "select keeps id"
 assert_ok !exists $cols[0]->{score}, "select drops score"
 
+# ── drop (complement of select) ──────────────────────────────────────
+val $dr = Arrow::drop($src, "$tmp/dropped.parquet", ["score"])
+assert_eq join(",", @{ $dr->{columns} }), "id,name", "drop keeps remaining columns in order"
+val @kept = Arrow::read("$tmp/dropped.parquet")
+assert_ok !exists $kept[0]->{score}, "drop removes score"
+assert_ok exists $kept[0]->{id},     "drop keeps id"
+assert_dies fn { Arrow::drop($src, "$tmp/x.parquet", ["nope"]) }, "drop errors on a missing column"
+
 # ── head / tail / slice ──────────────────────────────────────────────
 Arrow::head($src, "$tmp/head.parquet", 2)
 assert_eq Arrow::count("$tmp/head.parquet"), 2, "head 2 keeps 2 rows"

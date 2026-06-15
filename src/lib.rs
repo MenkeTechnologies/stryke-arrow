@@ -754,6 +754,40 @@ fn op_select(args: Value) -> Result<Value> {
     Ok(json!({"dst": io.dst.display().to_string(), "rows": rows, "columns": cols}))
 }
 
+/// Drop named columns, keeping the rest in their original order — the complement
+/// of `select`. Every named column must exist (a typo errors rather than
+/// silently no-ops). Returns the surviving column names.
+fn op_drop(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let cols = parse_columns(&args["columns"])
+        .ok_or_else(|| anyhow!("missing columns (array of names to drop)"))?;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    for c in &cols {
+        schema
+            .index_of(c)
+            .map_err(|_| anyhow!("drop: no column `{c}`"))?;
+    }
+    let drop: std::collections::HashSet<&str> = cols.iter().map(String::as_str).collect();
+    let indices: Vec<usize> = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| !drop.contains(f.name().as_str()))
+        .map(|(i, _)| i)
+        .collect();
+    let kept: Vec<String> = indices
+        .iter()
+        .map(|&i| schema.field(i).name().clone())
+        .collect();
+    let out_schema = Arc::new(schema.project(&indices)?);
+    let projected: Vec<RecordBatch> = batches
+        .iter()
+        .map(|b| b.project(&indices))
+        .collect::<std::result::Result<_, _>>()?;
+    let rows = write_result(&io, out_schema, &projected)?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows, "columns": kept}))
+}
+
 fn op_sort(args: Value) -> Result<Value> {
     let io = parse_io(&args)?;
     let by = args["by"]
@@ -1027,6 +1061,11 @@ pub extern "C" fn arrow__filter(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn arrow__select(args: *const c_char) -> *const c_char {
     ffi_call(args, op_select)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__drop(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_drop)
 }
 
 #[no_mangle]
@@ -1806,6 +1845,38 @@ mod tests {
         assert!(!obj.contains_key("name"), "name should be dropped");
         assert_eq!(rows[0]["score"].as_i64().unwrap(), 100);
         assert_eq!(rows[0]["id"].as_i64().unwrap(), 1);
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+    }
+
+    #[test]
+    fn op_drop_removes_named_columns_keeping_the_rest_in_order() {
+        // Drop `name` → surviving columns stay in source order [id, score].
+        let src = unique_csv("drop", "id,name,score\n1,a,100\n2,b,200\n");
+        let dst = dst_csv("drop");
+        let r = op_drop(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "columns": ["name"],
+        }))
+        .unwrap();
+        assert_eq!(
+            r["columns"],
+            json!(["id", "score"]),
+            "kept columns in original order"
+        );
+        let rows = read_back(&dst);
+        let obj = rows[0].as_object().unwrap();
+        assert!(!obj.contains_key("name"), "dropped column is gone");
+        assert_eq!(rows[0]["id"].as_i64().unwrap(), 1);
+        assert_eq!(rows[0]["score"].as_i64().unwrap(), 100);
+        // A typo'd column name is an error, not a silent no-op.
+        assert!(op_drop(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "columns": ["nope"],
+        }))
+        .is_err());
         let _ = std::fs::remove_file(src);
         let _ = std::fs::remove_file(dst);
     }
