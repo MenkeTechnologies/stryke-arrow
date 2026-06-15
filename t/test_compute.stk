@@ -1,0 +1,93 @@
+## t/test_compute.stk — assertion tests for the Arrow compute surface (v0.4.0).
+##
+## Uses stryke's native test framework (`assert_*` + `test_run`). Requires the
+## cdylib to be loaded — install once with `s pkg install -g .` from the
+## package root so stryke's FFI bridge dlopens `lib/libstryke_arrow.{dylib,so}`
+## on `use Arrow`.
+##
+## Every op is file→file; each test writes a source, runs the op, and reads the
+## result back so it asserts on the bytes that actually round-tripped through
+## Arrow, not just the op's return payload.
+
+use Arrow
+
+val $tmp = "/tmp/stryke-arrow-compute-test-$$"
+mkdir $tmp unless -d $tmp
+
+val @rows = (
+    { id => 3, name => "charlie", score => 72 },
+    { id => 1, name => "alice",   score => 90 },
+    { id => 4, name => "dana",    score => 55 },
+    { id => 2, name => "bob",     score => 88 },
+    { id => 5, name => "erin",    score => 61 },
+)
+val $src = "$tmp/src.parquet"
+Arrow::write($src, \@rows)
+
+# ── count ────────────────────────────────────────────────────────────
+assert_eq Arrow::count($src), 5, "count returns source row total"
+
+# ── filter ───────────────────────────────────────────────────────────
+Arrow::filter($src, "$tmp/ge.parquet", "score", "ge", 70)
+val @ge = Arrow::read("$tmp/ge.parquet")
+assert_eq scalar(@ge), 3, "filter score>=70 keeps 3 rows"
+assert_ok !(grep { $_->{score} < 70 } @ge), "filter drops all score<70"
+
+# ── filter by string equality ────────────────────────────────────────
+Arrow::filter($src, "$tmp/bob.parquet", "name", "eq", "bob")
+val @bob = Arrow::read("$tmp/bob.parquet")
+assert_eq scalar(@bob), 1, "string-eq filter matches exactly one"
+assert_eq $bob[0]->{id}, 2, "string-eq filter kept the right row"
+
+# ── sort descending ──────────────────────────────────────────────────
+Arrow::sort($src, "$tmp/sorted.parquet", [{ column => "score", descending => 1 }])
+val @sorted = Arrow::read("$tmp/sorted.parquet")
+assert_eq $sorted[0]->{score}, 90, "sort desc: first row is max score"
+assert_eq $sorted[-1]->{score}, 55, "sort desc: last row is min score"
+
+# ── select (reorder + drop) ──────────────────────────────────────────
+Arrow::select($src, "$tmp/cols.parquet", ["name", "id"])
+val @cols = Arrow::read("$tmp/cols.parquet")
+assert_ok exists $cols[0]->{name}, "select keeps name"
+assert_ok exists $cols[0]->{id}, "select keeps id"
+assert_ok !exists $cols[0]->{score}, "select drops score"
+
+# ── head / tail / slice ──────────────────────────────────────────────
+Arrow::head($src, "$tmp/head.parquet", 2)
+assert_eq Arrow::count("$tmp/head.parquet"), 2, "head 2 keeps 2 rows"
+
+Arrow::tail($src, "$tmp/tail.parquet", 1)
+val @tail = Arrow::read("$tmp/tail.parquet")
+assert_eq $tail[0]->{id}, 5, "tail 1 keeps the last source row"
+
+Arrow::slice($src, "$tmp/slice.parquet", 1, 2)
+val @slice = Arrow::read("$tmp/slice.parquet")
+assert_eq scalar(@slice), 2, "slice(1,2) yields 2 rows"
+assert_eq $slice[0]->{id}, 1, "slice(1,2) starts at offset 1 (id=1)"
+
+# ── concat ───────────────────────────────────────────────────────────
+Arrow::head($src, "$tmp/a.parquet", 2)
+Arrow::tail($src, "$tmp/b.parquet", 2)
+Arrow::concat(["$tmp/a.parquet", "$tmp/b.parquet"], "$tmp/cat.parquet")
+assert_eq Arrow::count("$tmp/cat.parquet"), 4, "concat sums both source row counts"
+
+# ── rename ───────────────────────────────────────────────────────────
+Arrow::rename($src, "$tmp/ren.parquet", { name => "label" })
+val @ren = Arrow::read("$tmp/ren.parquet")
+assert_ok exists $ren[0]->{label}, "rename produced the new column name"
+assert_ok !exists $ren[0]->{name}, "rename removed the old column name"
+assert_ok exists $ren[0]->{id}, "rename left unmapped columns intact"
+
+# ── cast ─────────────────────────────────────────────────────────────
+Arrow::cast($src, "$tmp/cast.parquet", { id => "str" })
+val $sch = Arrow::schema("$tmp/cast.parquet")
+val ($idf) = grep { $_->{name} eq "id" } @{ $sch->{fields} }
+assert_match qr/(?i)utf8|string/, $idf->{type}, "cast id→str updates schema type"
+
+# ── cleanup ──────────────────────────────────────────────────────────
+for val $f (qw(src ge bob sorted cols head tail slice a b cat ren cast)) {
+    unlink "$tmp/$f.parquet" if -e "$tmp/$f.parquet"
+}
+rmdir $tmp if -d $tmp
+
+test_run

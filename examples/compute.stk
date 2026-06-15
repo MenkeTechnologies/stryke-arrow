@@ -1,0 +1,43 @@
+#!/usr/bin/env stryke
+# examples/compute.stk — file→file compute pipeline over Arrow.
+#
+# Builds a small parquet dataset, then chains filter → sort → select → head,
+# each step reading the previous output. Demonstrates the compute surface
+# added in v0.4.0 (filter/select/sort/slice/head/tail/concat/rename/cast/count).
+#
+# Run:    s examples/compute.stk
+
+use Arrow
+
+val $dir = "/tmp/stryke-arrow-compute-$$"
+mkdir $dir unless -d $dir
+
+val @rows = (
+    { id => 1, name => "alice",   score => 90 },
+    { id => 2, name => "bob",     score => 55 },
+    { id => 3, name => "charlie", score => 72 },
+    { id => 4, name => "dana",    score => 88 },
+    { id => 5, name => "erin",    score => 61 },
+)
+Arrow::write("$dir/people.parquet", \@rows)
+
+# Keep score >= 70, sort by score descending, project [name, score], take top 2.
+Arrow::filter("$dir/people.parquet", "$dir/pass.parquet", "score", "ge", 70)
+Arrow::sort("$dir/pass.parquet", "$dir/sorted.parquet", [{ column => "score", descending => 1 }])
+Arrow::select("$dir/sorted.parquet", "$dir/cols.parquet", ["name", "score"])
+Arrow::head("$dir/cols.parquet", "$dir/top.parquet", 2)
+
+p sprintf("rows: source=%d  passing=%d  top=%d",
+    Arrow::count("$dir/people.parquet"),
+    Arrow::count("$dir/pass.parquet"),
+    Arrow::count("$dir/top.parquet"))
+
+for val $r (Arrow::read("$dir/top.parquet")) {
+    p sprintf("  %-8s %d", $r->{name}, $r->{score})
+}
+
+# cleanup
+for val $f (qw(people pass sorted cols top)) {
+    unlink "$dir/$f.parquet" if -e "$dir/$f.parquet"
+}
+rmdir $dir if -d $dir

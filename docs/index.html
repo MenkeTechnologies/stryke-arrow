@@ -136,6 +136,9 @@ make install</pre>
             <tr><td>per-column stats (null/min/max/distinct)</td><td><code>p to_json(Arrow::stats("sales.parquet"))</code></td></tr>
             <tr><td>write with compression</td><td><code>Arrow::write("out.parquet", \@rows, compression =&gt; "zstd")</code></td></tr>
             <tr><td>server-side convert (no stryke round-trip)</td><td><code>Arrow::convert("in.csv", "out.parquet", compression =&gt; "zstd")</code></td></tr>
+            <tr><td>filter rows server-side (file &rarr; file)</td><td><code>Arrow::filter("sales.parquet", "big.parquet", "amount", "ge", 1000)</code></td></tr>
+            <tr><td>sort then take top-N</td><td><code>Arrow::sort("big.parquet", "ranked.parquet", [{ column =&gt; "amount", descending =&gt; 1 }])</code></td></tr>
+            <tr><td>project / rename / cast columns</td><td><code>Arrow::select("x.parquet", "y.parquet", ["id", "name"])</code></td></tr>
           </tbody>
         </table>
         <p>The full API lives in the <a href="https://github.com/MenkeTechnologies/stryke-arrow#0x04-api-reference">README "API reference" section</a>.</p>
@@ -149,7 +152,7 @@ make install</pre>
 
       <section class="tutorial-section">
         <h2>FFI layer</h2>
-        <p>Each <code>Arrow::*</code> wrapper builds a JSON args dict and calls a sibling <code>arrow__*</code> symbol resolved out of <code>libstryke_arrow.{dylib,so}</code>. The cdylib is dlopened in-process on first <code>use Arrow</code> (via stryke's <code>pkg::commands::try_load_ffi_for</code> resolver hook) and exposes 7 entry points: <code>version</code>, <code>read</code>, <code>read_columnar</code>, <code>schema</code>, <code>stats</code>, <code>write</code>, <code>convert</code>. Responses are JSON; errors come back as <code>{"error": "&lt;msg&gt;"}</code> and the wrapper <code>die</code>s with the message. Stateless package &mdash; arrow operations are pure file transforms, no process-level cache.</p>
+        <p>Each <code>Arrow::*</code> wrapper builds a JSON args dict and calls a sibling <code>arrow__*</code> symbol resolved out of <code>libstryke_arrow.{dylib,so}</code>. The cdylib is dlopened in-process on first <code>use Arrow</code> (via stryke's <code>pkg::commands::try_load_ffi_for</code> resolver hook). Its exports span read (<code>version</code>, <code>read</code>, <code>read_columnar</code>, <code>schema</code>, <code>stats</code>), write (<code>write</code>), conversion (<code>convert</code>), and compute (<code>filter</code>, <code>select</code>, <code>sort</code>, <code>slice</code>, <code>head</code>, <code>tail</code>, <code>count</code>, <code>concat</code>, <code>rename</code>, <code>cast</code>); the authoritative list is <code>[ffi].exports</code> in <code>stryke.toml</code>. Responses are JSON; errors come back as <code>{"error": "&lt;msg&gt;"}</code> and the wrapper <code>die</code>s with the message. Stateless package &mdash; arrow operations are pure file transforms, no process-level cache.</p>
       </section>
 
       <section class="tutorial-section">

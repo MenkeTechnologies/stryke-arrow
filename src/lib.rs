@@ -532,6 +532,416 @@ fn op_convert(args: Value) -> Result<Value> {
     }))
 }
 
+// ── compute ─────────────────────────────────────────────────────────────────
+//
+// File→file transforms built on `open_reader` + `write_batches`: read the
+// source into RecordBatches, apply an Arrow compute kernel, write the result.
+// Output format defaults to the destination extension (else the source
+// format); compression/row_group default as in `op_write`.
+
+use arrow::array::{ArrayRef, BooleanArray, Scalar};
+use arrow::compute::kernels::cmp;
+use arrow::compute::{
+    concat_batches, filter_record_batch, lexsort_to_indices, take, SortColumn, SortOptions,
+};
+use arrow::datatypes::{DataType, Field};
+
+/// Source/destination paths, formats and write options for a transform.
+struct Io {
+    src: std::path::PathBuf,
+    dst: std::path::PathBuf,
+    src_fmt: Fmt,
+    dst_fmt: Fmt,
+    compression: String,
+    row_group: usize,
+}
+
+fn parse_io(args: &Value) -> Result<Io> {
+    let src = args["src"].as_str().ok_or_else(|| anyhow!("missing src"))?;
+    let dst = args["dst"].as_str().ok_or_else(|| anyhow!("missing dst"))?;
+    let src = Path::new(src);
+    let dst = Path::new(dst);
+    let src_fmt = Fmt::from_override_or_path(args["src_format"].as_str(), src)?;
+    let dst_fmt = match args["dst_format"].as_str() {
+        Some(n) => Fmt::parse(n)?,
+        None => Fmt::detect(dst).unwrap_or(src_fmt),
+    };
+    Ok(Io {
+        src: src.to_path_buf(),
+        dst: dst.to_path_buf(),
+        src_fmt,
+        dst_fmt,
+        compression: args["compression"].as_str().unwrap_or("snappy").to_string(),
+        row_group: args["row_group"].as_u64().unwrap_or(65536) as usize,
+    })
+}
+
+/// Read every batch of `src`, returning the (possibly projected) schema.
+fn read_all(
+    src: &Path,
+    fmt: Fmt,
+    columns: Option<&[String]>,
+) -> Result<(SchemaRef, Vec<RecordBatch>)> {
+    let reader = open_reader(src, fmt, columns, 8192)?;
+    let schema = reader.schema();
+    let batches: Vec<RecordBatch> = reader.collect::<std::result::Result<_, _>>()?;
+    Ok((schema, batches))
+}
+
+fn write_result(io: &Io, schema: SchemaRef, batches: &[RecordBatch]) -> Result<usize> {
+    let rows = batches.iter().map(|b| b.num_rows()).sum();
+    write_batches(
+        &io.dst,
+        io.dst_fmt,
+        schema,
+        batches,
+        &io.compression,
+        io.row_group,
+    )?;
+    Ok(rows)
+}
+
+/// Truthiness across the JSON shapes stryke emits for flags: a real boolean,
+/// a non-zero number (stryke `1`/`0`), or the strings `"true"`/`"1"`. stryke
+/// serializes `descending => 1` as the JSON number `1`, which `Value::as_bool`
+/// rejects — so flag parsing must be lenient or options silently no-op.
+fn json_truthy(v: &Value) -> bool {
+    match v {
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(false),
+        Value::String(s) => matches!(s.as_str(), "true" | "1"),
+        _ => false,
+    }
+}
+
+fn parse_dtype(name: &str) -> Result<DataType> {
+    Ok(match name.to_ascii_lowercase().as_str() {
+        "int" | "int64" | "i64" | "long" => DataType::Int64,
+        "int32" | "i32" => DataType::Int32,
+        "float" | "float64" | "f64" | "double" => DataType::Float64,
+        "float32" | "f32" => DataType::Float32,
+        "str" | "string" | "utf8" => DataType::Utf8,
+        "bool" | "boolean" => DataType::Boolean,
+        other => bail!("unknown type `{other}` (int|int32|float|float32|str|bool)"),
+    })
+}
+
+/// Build a single-element Arrow array of type `dt` from a JSON scalar — the
+/// right-hand side of a comparison in `op_filter`.
+fn scalar_for(dt: &DataType, v: &Value) -> Result<ArrayRef> {
+    use arrow::array::{BooleanArray, Float64Array, Int64Array, StringArray};
+    let arr: ArrayRef = match dt {
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64 => {
+            let n = v
+                .as_i64()
+                .ok_or_else(|| anyhow!("expected integer value for column type {dt:?}"))?;
+            arrow::compute::cast(&Int64Array::from(vec![n]), dt)?
+        }
+        DataType::Float16 | DataType::Float32 | DataType::Float64 => {
+            let f = v
+                .as_f64()
+                .ok_or_else(|| anyhow!("expected number value for column type {dt:?}"))?;
+            arrow::compute::cast(&Float64Array::from(vec![f]), dt)?
+        }
+        DataType::Utf8 | DataType::LargeUtf8 => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| anyhow!("expected string value for column type {dt:?}"))?;
+            arrow::compute::cast(&StringArray::from(vec![s]), dt)?
+        }
+        DataType::Boolean => {
+            let b = v
+                .as_bool()
+                .ok_or_else(|| anyhow!("expected boolean value for column type {dt:?}"))?;
+            Arc::new(BooleanArray::from(vec![b]))
+        }
+        other => bail!("filter: unsupported column type {other:?}"),
+    };
+    Ok(arr)
+}
+
+/// Slice `[offset, offset+length)` (absolute rows) across a batch sequence.
+fn slice_batches(
+    batches: &[RecordBatch],
+    offset: usize,
+    length: Option<usize>,
+) -> Vec<RecordBatch> {
+    let want = length.unwrap_or(usize::MAX);
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut emitted = 0usize;
+    for b in batches {
+        let n = b.num_rows();
+        let batch_start = start;
+        start += n;
+        if batch_start + n <= offset {
+            continue;
+        }
+        let local = offset.saturating_sub(batch_start);
+        if local >= n {
+            continue;
+        }
+        let remaining = want.saturating_sub(emitted);
+        if remaining == 0 {
+            break;
+        }
+        let take_n = (n - local).min(remaining);
+        out.push(b.slice(local, take_n));
+        emitted += take_n;
+        if emitted >= want {
+            break;
+        }
+    }
+    out
+}
+
+fn op_filter(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?;
+    let op = args["op"].as_str().unwrap_or("eq");
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let idx = schema
+        .index_of(column)
+        .map_err(|_| anyhow!("filter: no column `{column}`"))?;
+    let dt = schema.field(idx).data_type().clone();
+    let scalar = Scalar::new(scalar_for(&dt, &args["value"])?);
+    let mut out = Vec::with_capacity(batches.len());
+    for b in &batches {
+        let col = b.column(idx);
+        let mask: BooleanArray = match op {
+            "eq" | "==" => cmp::eq(col, &scalar)?,
+            "ne" | "!=" => cmp::neq(col, &scalar)?,
+            "lt" | "<" => cmp::lt(col, &scalar)?,
+            "le" | "<=" => cmp::lt_eq(col, &scalar)?,
+            "gt" | ">" => cmp::gt(col, &scalar)?,
+            "ge" | ">=" => cmp::gt_eq(col, &scalar)?,
+            other => bail!("filter: unknown op `{other}` (eq|ne|lt|le|gt|ge)"),
+        };
+        out.push(filter_record_batch(b, &mask)?);
+    }
+    let rows = write_result(&io, schema, &out)?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
+}
+
+fn op_select(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let cols = parse_columns(&args["columns"])
+        .ok_or_else(|| anyhow!("missing columns (array of names)"))?;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let indices: Vec<usize> = cols
+        .iter()
+        .map(|c| {
+            schema
+                .index_of(c)
+                .map_err(|_| anyhow!("select: no column `{c}`"))
+        })
+        .collect::<Result<_>>()?;
+    let out_schema = Arc::new(schema.project(&indices)?);
+    let projected: Vec<RecordBatch> = batches
+        .iter()
+        .map(|b| b.project(&indices))
+        .collect::<std::result::Result<_, _>>()?;
+    let rows = write_result(&io, out_schema, &projected)?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows, "columns": cols}))
+}
+
+fn op_sort(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let by = args["by"]
+        .as_array()
+        .ok_or_else(|| anyhow!("missing by (array of {{column, descending}})"))?;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let merged = concat_batches(&schema, &batches)?;
+    let sort_cols: Vec<SortColumn> = by
+        .iter()
+        .map(|spec| -> Result<SortColumn> {
+            let name = spec["column"]
+                .as_str()
+                .or_else(|| spec.as_str())
+                .ok_or_else(|| anyhow!("sort: each `by` entry needs a column name"))?;
+            let descending = json_truthy(&spec["descending"]);
+            let idx = schema
+                .index_of(name)
+                .map_err(|_| anyhow!("sort: no column `{name}`"))?;
+            let nulls_first = match &spec["nulls_first"] {
+                Value::Null => descending,
+                other => json_truthy(other),
+            };
+            Ok(SortColumn {
+                values: merged.column(idx).clone(),
+                options: Some(SortOptions {
+                    descending,
+                    nulls_first,
+                }),
+            })
+        })
+        .collect::<Result<_>>()?;
+    let indices = lexsort_to_indices(&sort_cols, None)?;
+    let cols: Vec<ArrayRef> = merged
+        .columns()
+        .iter()
+        .map(|c| take(c, &indices, None))
+        .collect::<std::result::Result<_, _>>()?;
+    let sorted = RecordBatch::try_new(schema.clone(), cols)?;
+    let rows = write_result(&io, schema, &[sorted])?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
+}
+
+fn op_slice(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+    let length = args["length"].as_u64().map(|n| n as usize);
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let out = slice_batches(&batches, offset, length);
+    let rows = write_result(&io, schema, &out)?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
+}
+
+fn op_head(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let n = args["n"].as_u64().unwrap_or(10) as usize;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let out = slice_batches(&batches, 0, Some(n));
+    let rows = write_result(&io, schema, &out)?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
+}
+
+fn op_tail(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let n = args["n"].as_u64().unwrap_or(10) as usize;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    let offset = total.saturating_sub(n);
+    let out = slice_batches(&batches, offset, None);
+    let rows = write_result(&io, schema, &out)?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
+}
+
+fn op_count(args: Value) -> Result<Value> {
+    let path = args["src"]
+        .as_str()
+        .or_else(|| args["path"].as_str())
+        .ok_or_else(|| anyhow!("missing src"))?;
+    let path = Path::new(path);
+    let fmt = Fmt::from_override_or_path(args["format"].as_str(), path)?;
+    let reader = open_reader(path, fmt, None, 8192)?;
+    let mut rows = 0usize;
+    for b in reader {
+        rows += b?.num_rows();
+    }
+    Ok(json!({"src": path.display().to_string(), "rows": rows}))
+}
+
+fn op_concat(args: Value) -> Result<Value> {
+    let dst = args["dst"].as_str().ok_or_else(|| anyhow!("missing dst"))?;
+    let dst = Path::new(dst);
+    let srcs = args["srcs"]
+        .as_array()
+        .ok_or_else(|| anyhow!("missing srcs (array of paths)"))?;
+    if srcs.is_empty() {
+        bail!("concat: srcs is empty");
+    }
+    let dst_fmt = Fmt::from_override_or_path(args["dst_format"].as_str(), dst)?;
+    let compression = args["compression"].as_str().unwrap_or("snappy").to_string();
+    let row_group = args["row_group"].as_u64().unwrap_or(65536) as usize;
+    let mut schema: Option<SchemaRef> = None;
+    let mut all: Vec<RecordBatch> = Vec::new();
+    for s in srcs {
+        let p = s
+            .as_str()
+            .ok_or_else(|| anyhow!("concat: src not a string"))?;
+        let p = Path::new(p);
+        let fmt = Fmt::from_override_or_path(args["src_format"].as_str(), p)?;
+        let (sch, batches) = read_all(p, fmt, None)?;
+        match &schema {
+            None => schema = Some(sch),
+            Some(first) if first.fields() != sch.fields() => {
+                bail!(
+                    "concat: schema of `{}` differs from the first source",
+                    p.display()
+                )
+            }
+            _ => {}
+        }
+        all.extend(batches);
+    }
+    let schema = schema.unwrap();
+    write_batches(dst, dst_fmt, schema, &all, &compression, row_group)?;
+    let rows = all.iter().map(|b| b.num_rows()).sum::<usize>();
+    Ok(json!({"dst": dst.display().to_string(), "rows": rows, "sources": srcs.len()}))
+}
+
+fn op_rename(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let map = args["map"]
+        .as_object()
+        .ok_or_else(|| anyhow!("missing map ({{old: new}})"))?;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let fields: Vec<Arc<Field>> = schema
+        .fields()
+        .iter()
+        .map(|f| match map.get(f.name()).and_then(|v| v.as_str()) {
+            Some(new) => Arc::new(f.as_ref().clone().with_name(new)),
+            None => f.clone(),
+        })
+        .collect();
+    let new_schema = Arc::new(Schema::new(fields));
+    let renamed: Vec<RecordBatch> = batches
+        .iter()
+        .map(|b| RecordBatch::try_new(new_schema.clone(), b.columns().to_vec()))
+        .collect::<std::result::Result<_, _>>()?;
+    let rows = write_result(&io, new_schema, &renamed)?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
+}
+
+fn op_cast(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let casts = args["casts"]
+        .as_object()
+        .ok_or_else(|| anyhow!("missing casts ({{column: type}})"))?;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let mut targets: Vec<(usize, DataType)> = Vec::new();
+    for (name, ty) in casts {
+        let idx = schema
+            .index_of(name)
+            .map_err(|_| anyhow!("cast: no column `{name}`"))?;
+        let dt = parse_dtype(
+            ty.as_str()
+                .ok_or_else(|| anyhow!("cast: type not a string"))?,
+        )?;
+        targets.push((idx, dt));
+    }
+    let fields: Vec<Arc<Field>> = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(i, f)| match targets.iter().find(|(idx, _)| *idx == i) {
+            Some((_, dt)) => Arc::new(Field::new(f.name(), dt.clone(), f.is_nullable())),
+            None => f.clone(),
+        })
+        .collect();
+    let new_schema = Arc::new(Schema::new(fields));
+    let mut out = Vec::with_capacity(batches.len());
+    for b in &batches {
+        let mut cols: Vec<ArrayRef> = b.columns().to_vec();
+        for (idx, dt) in &targets {
+            cols[*idx] = arrow::compute::cast(b.column(*idx), dt)?;
+        }
+        out.push(RecordBatch::try_new(new_schema.clone(), cols)?);
+    }
+    let rows = write_result(&io, new_schema, &out)?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
+}
+
 // ── FFI plumbing ────────────────────────────────────────────────────────────
 
 fn ffi_call<F>(args: *const c_char, handler: F) -> *const c_char
@@ -607,6 +1017,56 @@ pub extern "C" fn arrow__write(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn arrow__convert(args: *const c_char) -> *const c_char {
     ffi_call(args, op_convert)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__filter(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_filter)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__select(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_select)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__sort(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_sort)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__slice(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_slice)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__head(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_head)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__tail(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_tail)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__count(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_count)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__concat(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_concat)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__rename(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_rename)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__cast(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_cast)
 }
 
 #[cfg(test)]
@@ -1268,5 +1728,240 @@ mod tests {
             );
         }
         let _ = std::fs::remove_file(path);
+    }
+
+    // ── compute ops ──────────────────────────────────────────────────────────
+    // All transforms are file→file. Each test writes a CSV, runs the op into a
+    // unique CSV destination, reads it back via `op_read`, and asserts on the
+    // materialized rows — the same surface a `.stk` caller sees.
+
+    fn dst_csv(prefix: &str) -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "stryke_arrow_dst_{}_{}_{}.csv",
+            prefix,
+            std::process::id(),
+            n
+        ))
+    }
+
+    fn read_back(path: &std::path::PathBuf) -> Vec<Value> {
+        let r = op_read(json!({"path": path.to_str().unwrap(), "format": "csv"})).unwrap();
+        r["rows"].as_array().unwrap().clone()
+    }
+
+    #[test]
+    fn op_filter_gt_keeps_only_matching_rows() {
+        // `id > 2` over 1..=4 must keep exactly {3,4}. A scalar built at the
+        // wrong DataType (e.g. comparing Int64 column to a Utf8 scalar) would
+        // error in `cmp::gt`; an off-by-one in the kernel would keep id==2.
+        let src = unique_csv("filter", "id,name\n1,a\n2,b\n3,c\n4,d\n");
+        let dst = dst_csv("filter");
+        let r = op_filter(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "column": "id", "op": "gt", "value": 2,
+        }))
+        .unwrap();
+        assert_eq!(r["rows"].as_i64().unwrap(), 2);
+        let rows = read_back(&dst);
+        let ids: Vec<i64> = rows.iter().map(|x| x["id"].as_i64().unwrap()).collect();
+        assert_eq!(ids, vec![3, 4], "filter id>2 must keep exactly 3,4");
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+    }
+
+    #[test]
+    fn op_filter_string_eq_matches_exact_value() {
+        let src = unique_csv("filtstr", "id,name\n1,keep\n2,drop\n3,keep\n");
+        let dst = dst_csv("filtstr");
+        op_filter(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "column": "name", "op": "eq", "value": "keep",
+        }))
+        .unwrap();
+        let rows = read_back(&dst);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r["name"].as_str() == Some("keep")));
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+    }
+
+    #[test]
+    fn op_select_reorders_and_drops_columns() {
+        // Request order is [score, id] — projection must preserve that order
+        // and drop `name`. A naive impl that keeps source order would fail.
+        let src = unique_csv("select", "id,name,score\n1,a,100\n2,b,200\n");
+        let dst = dst_csv("select");
+        op_select(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "columns": ["score", "id"],
+        }))
+        .unwrap();
+        let rows = read_back(&dst);
+        let obj = rows[0].as_object().unwrap();
+        assert!(!obj.contains_key("name"), "name should be dropped");
+        assert_eq!(rows[0]["score"].as_i64().unwrap(), 100);
+        assert_eq!(rows[0]["id"].as_i64().unwrap(), 1);
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+    }
+
+    #[test]
+    fn op_sort_descending_orders_across_batches() {
+        let src = unique_csv("sort", "id\n3\n1\n4\n1\n5\n9\n2\n");
+        let dst = dst_csv("sort");
+        op_sort(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "by": [{"column": "id", "descending": true}],
+        }))
+        .unwrap();
+        let ids: Vec<i64> = read_back(&dst)
+            .iter()
+            .map(|r| r["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![9, 5, 4, 3, 2, 1, 1]);
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+    }
+
+    #[test]
+    fn op_sort_accepts_numeric_descending_flag() {
+        // stryke serializes `descending => 1` as JSON number 1, not boolean
+        // true. `Value::as_bool` rejects that, so a naive impl silently sorts
+        // ascending. This pins the lenient `json_truthy` parse end-to-end.
+        let src = unique_csv("sortnum", "id\n3\n1\n2\n");
+        let dst = dst_csv("sortnum");
+        op_sort(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "by": [{"column": "id", "descending": 1}],
+        }))
+        .unwrap();
+        let ids: Vec<i64> = read_back(&dst)
+            .iter()
+            .map(|r| r["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![3, 2, 1],
+            "numeric descending:1 must sort descending"
+        );
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+    }
+
+    #[test]
+    fn op_head_tail_slice_pick_correct_windows() {
+        let src = unique_csv("window", "id\n1\n2\n3\n4\n5\n6\n7\n8\n");
+        let h = dst_csv("head");
+        op_head(json!({"src": src.to_str().unwrap(), "src_format":"csv", "dst": h.to_str().unwrap(), "dst_format":"csv", "n": 3})).unwrap();
+        assert_eq!(
+            read_back(&h)
+                .iter()
+                .map(|r| r["id"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        let t = dst_csv("tail");
+        op_tail(json!({"src": src.to_str().unwrap(), "src_format":"csv", "dst": t.to_str().unwrap(), "dst_format":"csv", "n": 2})).unwrap();
+        assert_eq!(
+            read_back(&t)
+                .iter()
+                .map(|r| r["id"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![7, 8]
+        );
+        let s = dst_csv("slice");
+        op_slice(json!({"src": src.to_str().unwrap(), "src_format":"csv", "dst": s.to_str().unwrap(), "dst_format":"csv", "offset": 2, "length": 3})).unwrap();
+        assert_eq!(
+            read_back(&s)
+                .iter()
+                .map(|r| r["id"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![3, 4, 5]
+        );
+        for p in [src, h, t, s] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn op_count_sums_rows_without_materializing() {
+        let src = unique_csv("count", "id\n1\n2\n3\n4\n5\n");
+        let r = op_count(json!({"src": src.to_str().unwrap(), "format": "csv"})).unwrap();
+        assert_eq!(r["rows"].as_i64().unwrap(), 5);
+        let _ = std::fs::remove_file(src);
+    }
+
+    #[test]
+    fn op_concat_appends_sources_in_order() {
+        let a = unique_csv("cata", "id\n1\n2\n");
+        let b = unique_csv("catb", "id\n3\n4\n");
+        let dst = dst_csv("cat");
+        let r = op_concat(json!({
+            "srcs": [a.to_str().unwrap(), b.to_str().unwrap()],
+            "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+        }))
+        .unwrap();
+        assert_eq!(r["rows"].as_i64().unwrap(), 4);
+        let ids: Vec<i64> = read_back(&dst)
+            .iter()
+            .map(|r| r["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![1, 2, 3, 4]);
+        for p in [a, b, dst] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn op_rename_changes_only_mapped_columns() {
+        let src = unique_csv("rename", "id,name\n1,a\n2,b\n");
+        let dst = dst_csv("rename");
+        op_rename(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "map": {"name": "label"},
+        }))
+        .unwrap();
+        let obj = read_back(&dst)[0].as_object().unwrap().clone();
+        assert!(obj.contains_key("label"), "renamed column missing");
+        assert!(obj.contains_key("id"), "unmapped column should survive");
+        assert!(!obj.contains_key("name"), "old name should be gone");
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+    }
+
+    #[test]
+    fn op_cast_changes_column_type_in_output_schema() {
+        // id is inferred Int64 from CSV; cast to Utf8 and confirm the read-back
+        // schema reports a string type for it.
+        let src = unique_csv("cast", "id,score\n1,10\n2,20\n");
+        let dst = dst_csv("cast");
+        op_cast(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "ipc",
+            "casts": {"id": "str"},
+        }))
+        .unwrap();
+        let sch = op_schema(json!({"path": dst.to_str().unwrap(), "format": "ipc"})).unwrap();
+        let fields = sch["fields"].as_array().unwrap();
+        let id_field = fields
+            .iter()
+            .find(|f| f["name"].as_str() == Some("id"))
+            .unwrap();
+        let ty = id_field["type"].as_str().unwrap_or_default().to_lowercase();
+        assert!(
+            ty.contains("utf8") || ty.contains("string"),
+            "id not cast to string: {ty}"
+        );
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
     }
 }

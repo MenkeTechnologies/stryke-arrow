@@ -158,6 +158,150 @@ fn Arrow::convert ($src, $dst, %opts) {
 }
 
 
+# ── compute ──────────────────────────────────────────────────────────
+#
+# File→file transforms over the `arrow__*` compute exports: read $src, apply
+# an Arrow kernel, write $dst. dst format defaults to the dst extension (else
+# the src format). opts: src_format, dst_format, compression, row_group.
+
+## Keep rows where $column $op $value. op ∈ eq|ne|lt|le|gt|ge.
+fn Arrow::filter ($src, $dst, $column, $op, $value, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        column => $column,
+        op => $op,
+        value => $value,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("filter", arrow__filter(to_json(\%req)))
+}
+
+## Project/reorder columns. $cols is an arrayref of names in output order.
+fn Arrow::select ($src, $dst, $cols, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        columns => $cols,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("select", arrow__select(to_json(\%req)))
+}
+
+## Sort rows. $by is an arrayref of { column => name, descending => bool }.
+fn Arrow::sort ($src, $dst, $by, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        by => $by,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("sort", arrow__sort(to_json(\%req)))
+}
+
+## First $n rows.
+fn Arrow::head ($src, $dst, $n, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        n => $n,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("head", arrow__head(to_json(\%req)))
+}
+
+## Last $n rows.
+fn Arrow::tail ($src, $dst, $n, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        n => $n,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("tail", arrow__tail(to_json(\%req)))
+}
+
+## Rows in the half-open window [$offset, $offset+$length).
+fn Arrow::slice ($src, $dst, $offset, $length, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        offset => $offset,
+        length => $length,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("slice", arrow__slice(to_json(\%req)))
+}
+
+## Concatenate $srcs (arrayref of paths, identical schema) into $dst.
+fn Arrow::concat ($srcs, $dst, %opts) {
+    val %req = (
+        srcs => $srcs,
+        dst => $dst,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("concat", arrow__concat(to_json(\%req)))
+}
+
+## Rename columns. $map is { old => new }; unmapped columns pass through.
+fn Arrow::rename ($src, $dst, $map, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        map => $map,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("rename", arrow__rename(to_json(\%req)))
+}
+
+## Cast columns. $casts is { column => type } (int|int32|float|float32|str|bool).
+fn Arrow::cast ($src, $dst, $casts, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        casts => $casts,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("cast", arrow__cast(to_json(\%req)))
+}
+
+## Row count read straight from the source (no JSON materialization).
+fn Arrow::count ($path, %opts) {
+    val %req = (
+        src => $path,
+        format => $opts{format},
+    )
+    Arrow::_decode("count", arrow__count(to_json(\%req)))->{rows}
+}
+
+
 # ── convenience composites ──────────────────────────────────────────
 #
 # Pure-stryke helpers over schema / row_count — no new FFI. The slurpy
