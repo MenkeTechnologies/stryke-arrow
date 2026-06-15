@@ -545,6 +545,7 @@ use arrow::compute::{
     concat_batches, filter_record_batch, lexsort_to_indices, take, SortColumn, SortOptions,
 };
 use arrow::datatypes::{DataType, Field};
+use arrow::row::{RowConverter, SortField};
 
 /// Source/destination paths, formats and write options for a transform.
 struct Io {
@@ -786,6 +787,38 @@ fn op_drop(args: Value) -> Result<Value> {
         .collect::<std::result::Result<_, _>>()?;
     let rows = write_result(&io, out_schema, &projected)?;
     Ok(json!({"dst": io.dst.display().to_string(), "rows": rows, "columns": kept}))
+}
+
+/// Drop duplicate rows, keeping the first occurrence of each distinct row in
+/// input order. Comparison spans every column (via Arrow's `RowConverter`, so
+/// all types and nulls are handled). Reports the deduped `rows` and the number
+/// `dropped`.
+fn op_distinct(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let merged = concat_batches(&schema, &batches)?;
+    let total = merged.num_rows();
+    let converter = RowConverter::new(
+        schema
+            .fields()
+            .iter()
+            .map(|f| SortField::new(f.data_type().clone()))
+            .collect(),
+    )?;
+    let row_set = converter.convert_columns(merged.columns())?;
+    // `seen.insert` is true for the first time a row appears → keep it.
+    let mut seen = std::collections::HashSet::new();
+    let mask: BooleanArray = (0..row_set.num_rows())
+        .map(|i| seen.insert(row_set.row(i)))
+        .collect();
+    let distinct = filter_record_batch(&merged, &mask)?;
+    let kept = distinct.num_rows();
+    let rows = write_result(&io, schema, &[distinct])?;
+    Ok(json!({
+        "dst": io.dst.display().to_string(),
+        "rows": rows,
+        "dropped": total - kept,
+    }))
 }
 
 fn op_sort(args: Value) -> Result<Value> {
@@ -1066,6 +1099,11 @@ pub extern "C" fn arrow__select(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn arrow__drop(args: *const c_char) -> *const c_char {
     ffi_call(args, op_drop)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__distinct(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_distinct)
 }
 
 #[no_mangle]
@@ -1879,6 +1917,46 @@ mod tests {
         .is_err());
         let _ = std::fs::remove_file(src);
         let _ = std::fs::remove_file(dst);
+    }
+
+    #[test]
+    fn op_distinct_keeps_first_occurrence_of_each_row() {
+        // Rows 1 and 4 are identical (a,1); only the first survives, in order.
+        let src = unique_csv("distinct", "name,n\na,1\nb,2\na,1\nc,3\nb,2\n");
+        let dst = dst_csv("distinct");
+        let r = op_distinct(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+        }))
+        .unwrap();
+        assert_eq!(r["rows"].as_u64().unwrap(), 3, "3 distinct rows");
+        assert_eq!(
+            r["dropped"].as_u64().unwrap(),
+            2,
+            "2 duplicate rows dropped"
+        );
+        let rows = read_back(&dst);
+        // First-occurrence order preserved: (a,1), (b,2), (c,3).
+        assert_eq!(rows[0]["name"].as_str().unwrap(), "a");
+        assert_eq!(rows[1]["name"].as_str().unwrap(), "b");
+        assert_eq!(rows[2]["name"].as_str().unwrap(), "c");
+        // A distinguishing column makes otherwise-similar rows unique.
+        let src2 = unique_csv("distinct2", "x,y\n1,1\n1,2\n1,1\n");
+        let dst2 = dst_csv("distinct2");
+        let r2 = op_distinct(json!({
+            "src": src2.to_str().unwrap(), "src_format": "csv",
+            "dst": dst2.to_str().unwrap(), "dst_format": "csv",
+        }))
+        .unwrap();
+        assert_eq!(
+            r2["rows"].as_u64().unwrap(),
+            2,
+            "(1,1) and (1,2) are distinct"
+        );
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+        let _ = std::fs::remove_file(src2);
+        let _ = std::fs::remove_file(dst2);
     }
 
     #[test]

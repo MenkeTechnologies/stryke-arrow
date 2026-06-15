@@ -60,6 +60,21 @@ assert_ok !exists $kept[0]->{score}, "drop removes score"
 assert_ok exists $kept[0]->{id},     "drop keeps id"
 assert_dies fn { Arrow::drop($src, "$tmp/x.parquet", ["nope"]) }, "drop errors on a missing column"
 
+# ── distinct (dedupe rows, first occurrence kept) ────────────────────
+val @dups = (
+    { tag => "a", n => 1 },
+    { tag => "b", n => 2 },
+    { tag => "a", n => 1 },   # duplicate of row 0
+    { tag => "c", n => 3 },
+    { tag => "b", n => 2 },   # duplicate of row 1
+)
+Arrow::write("$tmp/dups.parquet", \@dups)
+val $di = Arrow::distinct("$tmp/dups.parquet", "$tmp/distinct.parquet")
+assert_eq $di->{rows}, 3,    "distinct: 3 unique rows"
+assert_eq $di->{dropped}, 2, "distinct: 2 duplicates dropped"
+val @uniq = Arrow::read("$tmp/distinct.parquet")
+assert_eq join(",", map { $_->{tag} } @uniq), "a,b,c", "distinct: first-occurrence order preserved"
+
 # ── head / tail / slice ──────────────────────────────────────────────
 Arrow::head($src, "$tmp/head.parquet", 2)
 assert_eq Arrow::count("$tmp/head.parquet"), 2, "head 2 keeps 2 rows"

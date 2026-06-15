@@ -238,6 +238,9 @@ Project and reorder to `\@cols` (output order = request order).
 #### `Arrow::drop(SRC, DST, \@cols, %opts) → { dst, rows, columns }`
 Complement of `select`: remove `\@cols`, keep the rest in original order. Each named column must exist (a typo errors). `columns` lists the survivors.
 
+#### `Arrow::distinct(SRC, DST, %opts) → { dst, rows, dropped }`
+Drop duplicate rows, keeping the first occurrence of each distinct row in input order. Compares every column (all types + nulls, via Arrow's row encoding). `dropped` is the number removed.
+
 #### `Arrow::sort(SRC, DST, \@by, %opts) → { dst, rows }`
 Lexicographic sort. `\@by` is `[{ column => NAME, descending => 1, nulls_first => 0 }, …]`.
 

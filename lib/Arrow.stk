@@ -210,6 +210,20 @@ fn Arrow::drop ($src, $dst, $cols, %opts) {
     Arrow::_decode("drop", arrow__drop(to_json(\%req)))
 }
 
+## Drop duplicate rows, keeping the first occurrence of each distinct row in
+## input order. Comparison spans every column. Returns { dst, rows, dropped }.
+fn Arrow::distinct ($src, $dst, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("distinct", arrow__distinct(to_json(\%req)))
+}
+
 ## Sort rows. $by is an arrayref of { column => name, descending => bool }.
 fn Arrow::sort ($src, $dst, $by, %opts) {
     val %req = (
