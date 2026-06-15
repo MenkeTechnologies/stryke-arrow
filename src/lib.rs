@@ -901,6 +901,25 @@ fn op_sort(args: Value) -> Result<Value> {
     Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
 }
 
+/// Reverse the row order of a table (last row first). Reads all batches, takes
+/// every column by descending index, and writes the result — independent of any
+/// sort key, so it just flips whatever order the rows are already in. Pure.
+fn op_reverse(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let merged = concat_batches(&schema, &batches)?;
+    let n = merged.num_rows() as u32;
+    let indices = arrow::array::UInt32Array::from_iter_values((0..n).rev());
+    let cols: Vec<ArrayRef> = merged
+        .columns()
+        .iter()
+        .map(|c| take(c, &indices, None))
+        .collect::<std::result::Result<_, _>>()?;
+    let reversed = RecordBatch::try_new(schema.clone(), cols)?;
+    let rows = write_result(&io, schema, &[reversed])?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
+}
+
 fn op_slice(args: Value) -> Result<Value> {
     let io = parse_io(&args)?;
     let offset = args["offset"].as_u64().unwrap_or(0) as usize;
@@ -1152,6 +1171,11 @@ pub extern "C" fn arrow__drop_nulls(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn arrow__sort(args: *const c_char) -> *const c_char {
     ffi_call(args, op_sort)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__reverse(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_reverse)
 }
 
 #[no_mangle]
@@ -2061,6 +2085,38 @@ mod tests {
         assert_eq!(ids, vec![9, 5, 4, 3, 2, 1, 1]);
         let _ = std::fs::remove_file(src);
         let _ = std::fs::remove_file(dst);
+    }
+
+    #[test]
+    fn op_reverse_flips_row_order_across_batches() {
+        let src = unique_csv("reverse", "id\n1\n2\n3\n4\n5\n");
+        let dst = dst_csv("reverse");
+        let r = op_reverse(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+        }))
+        .unwrap();
+        assert_eq!(r["rows"].as_u64().unwrap(), 5, "row count preserved");
+        let ids: Vec<i64> = read_back(&dst)
+            .iter()
+            .map(|r| r["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![5, 4, 3, 2, 1], "rows are in reverse input order");
+        // Reversing twice restores the original order.
+        let dst2 = dst_csv("reverse2");
+        op_reverse(json!({
+            "src": dst.to_str().unwrap(), "src_format": "csv",
+            "dst": dst2.to_str().unwrap(), "dst_format": "csv",
+        }))
+        .unwrap();
+        let ids2: Vec<i64> = read_back(&dst2)
+            .iter()
+            .map(|r| r["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids2, vec![1, 2, 3, 4, 5], "double reverse is identity");
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+        let _ = std::fs::remove_file(dst2);
     }
 
     #[test]

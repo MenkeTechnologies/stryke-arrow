@@ -247,6 +247,9 @@ Drop rows that are null in any of `\@cols` (omit to check every column). A row s
 #### `Arrow::sort(SRC, DST, \@by, %opts) → { dst, rows }`
 Lexicographic sort. `\@by` is `[{ column => NAME, descending => 1, nulls_first => 0 }, …]`.
 
+#### `Arrow::reverse(SRC, DST, %opts) → { dst, rows }`
+Reverse the row order (last row first), independent of any sort key — just flips whatever order the rows are already in. A double reverse is the identity.
+
 #### `Arrow::head(SRC, DST, N, %opts)` / `Arrow::tail(SRC, DST, N, %opts) → { dst, rows }`
 First / last `N` rows.
 

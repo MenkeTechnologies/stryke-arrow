@@ -253,6 +253,20 @@ fn Arrow::sort ($src, $dst, $by, %opts) {
     Arrow::_decode("sort", arrow__sort(to_json(\%req)))
 }
 
+## Reverse the row order (last row first) — independent of any sort key. Returns
+## { dst, rows }.
+fn Arrow::reverse ($src, $dst, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("reverse", arrow__reverse(to_json(\%req)))
+}
+
 ## First $n rows.
 fn Arrow::head ($src, $dst, $n, %opts) {
     val %req = (
