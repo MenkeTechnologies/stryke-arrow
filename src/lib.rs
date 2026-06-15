@@ -1785,7 +1785,7 @@ mod tests {
         ))
     }
 
-    fn read_back(path: &std::path::PathBuf) -> Vec<Value> {
+    fn read_back(path: &std::path::Path) -> Vec<Value> {
         let r = op_read(json!({"path": path.to_str().unwrap(), "format": "csv"})).unwrap();
         r["rows"].as_array().unwrap().clone()
     }
