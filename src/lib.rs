@@ -821,6 +821,44 @@ fn op_distinct(args: Value) -> Result<Value> {
     }))
 }
 
+/// Drop rows that are null in any of the given `columns` (default: every
+/// column). Per batch, builds a not-null mask for each target column, ANDs them,
+/// and filters — so a row survives only when all target columns are present.
+/// Returns the surviving row count and how many were dropped. Pure transform.
+fn op_drop_nulls(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let names: Vec<String> = match parse_columns(&args["columns"]) {
+        Some(c) if !c.is_empty() => c,
+        _ => schema.fields().iter().map(|f| f.name().clone()).collect(),
+    };
+    let indices: Vec<usize> = names
+        .iter()
+        .map(|c| {
+            schema
+                .index_of(c)
+                .map_err(|_| anyhow!("drop_nulls: no column `{c}`"))
+        })
+        .collect::<Result<_>>()?;
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    let mut out = Vec::with_capacity(batches.len());
+    for b in &batches {
+        let mut mask = BooleanArray::from(vec![true; b.num_rows()]);
+        for &idx in &indices {
+            let not_null = arrow::compute::is_not_null(b.column(idx).as_ref())?;
+            mask = arrow::compute::and(&mask, &not_null)?;
+        }
+        out.push(filter_record_batch(b, &mask)?);
+    }
+    let kept: usize = out.iter().map(|b| b.num_rows()).sum();
+    let rows = write_result(&io, schema, &out)?;
+    Ok(json!({
+        "dst": io.dst.display().to_string(),
+        "rows": rows,
+        "dropped": total - kept,
+    }))
+}
+
 fn op_sort(args: Value) -> Result<Value> {
     let io = parse_io(&args)?;
     let by = args["by"]
@@ -1104,6 +1142,11 @@ pub extern "C" fn arrow__drop(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn arrow__distinct(args: *const c_char) -> *const c_char {
     ffi_call(args, op_distinct)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__drop_nulls(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_drop_nulls)
 }
 
 #[no_mangle]
@@ -1956,6 +1999,48 @@ mod tests {
         let _ = std::fs::remove_file(src);
         let _ = std::fs::remove_file(dst);
         let _ = std::fs::remove_file(src2);
+        let _ = std::fs::remove_file(dst2);
+    }
+
+    #[test]
+    fn op_drop_nulls_removes_rows_null_in_target_columns() {
+        // score is empty (null) in row 2; id is never null.
+        let src = unique_csv("dropnulls", "id,score\n1,10\n2,\n3,30\n");
+        let dst = dst_csv("dropnulls");
+        // Default (all columns): the row with a null score is dropped.
+        let r = op_drop_nulls(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+        }))
+        .unwrap();
+        assert_eq!(r["rows"].as_u64().unwrap(), 2, "2 complete rows survive");
+        assert_eq!(r["dropped"].as_u64().unwrap(), 1, "1 row had a null");
+        let rows = read_back(&dst);
+        assert_eq!(rows[0]["id"].as_i64().unwrap(), 1);
+        assert_eq!(rows[1]["id"].as_i64().unwrap(), 3);
+        // Targeting only a column that has no nulls drops nothing.
+        let dst2 = dst_csv("dropnulls2");
+        let r2 = op_drop_nulls(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst2.to_str().unwrap(), "dst_format": "csv",
+            "columns": ["id"],
+        }))
+        .unwrap();
+        assert_eq!(
+            r2["rows"].as_u64().unwrap(),
+            3,
+            "id is never null → nothing dropped"
+        );
+        assert_eq!(r2["dropped"].as_u64().unwrap(), 0);
+        // An unknown column name errors rather than silently no-opping.
+        assert!(op_drop_nulls(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "columns": ["nope"],
+        }))
+        .is_err());
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
         let _ = std::fs::remove_file(dst2);
     }
 

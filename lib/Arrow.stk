@@ -224,6 +224,21 @@ fn Arrow::distinct ($src, $dst, %opts) {
     Arrow::_decode("distinct", arrow__distinct(to_json(\%req)))
 }
 
+## Drop rows that are null in any of $cols (an arrayref of names; omit or pass
+## undef to check every column). Returns { dst, rows, dropped }.
+fn Arrow::drop_nulls ($src, $dst, $cols = undef, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        columns => $cols,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("drop_nulls", arrow__drop_nulls(to_json(\%req)))
+}
+
 ## Sort rows. $by is an arrayref of { column => name, descending => bool }.
 fn Arrow::sort ($src, $dst, $by, %opts) {
     val %req = (

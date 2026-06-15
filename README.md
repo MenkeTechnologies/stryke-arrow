@@ -241,6 +241,9 @@ Complement of `select`: remove `\@cols`, keep the rest in original order. Each n
 #### `Arrow::distinct(SRC, DST, %opts) → { dst, rows, dropped }`
 Drop duplicate rows, keeping the first occurrence of each distinct row in input order. Compares every column (all types + nulls, via Arrow's row encoding). `dropped` is the number removed.
 
+#### `Arrow::drop_nulls(SRC, DST, \@cols?, %opts) → { dst, rows, dropped }`
+Drop rows that are null in any of `\@cols` (omit to check every column). A row survives only when all target columns are present. `dropped` is the number removed. Unknown column names error.
+
 #### `Arrow::sort(SRC, DST, \@by, %opts) → { dst, rows }`
 Lexicographic sort. `\@by` is `[{ column => NAME, descending => 1, nulls_first => 0 }, …]`.
 
