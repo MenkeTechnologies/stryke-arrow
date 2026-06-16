@@ -239,6 +239,23 @@ fn Arrow::drop_nulls ($src, $dst, $cols = undef, %opts) {
     Arrow::_decode("drop_nulls", arrow__drop_nulls(to_json(\%req)))
 }
 
+## Fill nulls in $cols (an arrayref of names; omit or pass undef for every
+## column) with the constant $value, typed to match each column — the fill
+## companion to drop_nulls. Row count is unchanged. Returns { dst, rows, filled }.
+fn Arrow::fill_null ($src, $dst, $value, $cols = undef, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        value => $value,
+        columns => $cols,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("fill_null", arrow__fill_null(to_json(\%req)))
+}
+
 ## Sort rows. $by is an arrayref of { column => name, descending => bool }.
 fn Arrow::sort ($src, $dst, $by, %opts) {
     val %req = (

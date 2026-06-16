@@ -859,6 +859,56 @@ fn op_drop_nulls(args: Value) -> Result<Value> {
     }))
 }
 
+/// Fill nulls in the given `columns` (default: every column) with a constant
+/// `value`, typed to match each column — the fill companion to `drop_nulls`
+/// (which removes null rows instead). `value` is coerced to each target column's
+/// type via the same `scalar_for` path as `filter`, so an integer column wants
+/// an integer fill, a string column a string, etc. Row count is unchanged;
+/// returns how many null cells were filled. Pure transform.
+fn op_fill_null(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let value = &args["value"];
+    if value.is_null() {
+        bail!("fill_null: missing value to fill with");
+    }
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let names: Vec<String> = match parse_columns(&args["columns"]) {
+        Some(c) if !c.is_empty() => c,
+        _ => schema.fields().iter().map(|f| f.name().clone()).collect(),
+    };
+    let indices: Vec<usize> = names
+        .iter()
+        .map(|c| {
+            schema
+                .index_of(c)
+                .map_err(|_| anyhow!("fill_null: no column `{c}`"))
+        })
+        .collect::<Result<_>>()?;
+    let mut filled = 0usize;
+    let mut out = Vec::with_capacity(batches.len());
+    for b in &batches {
+        let mut cols: Vec<ArrayRef> = b.columns().to_vec();
+        for &idx in &indices {
+            let nulls = cols[idx].null_count();
+            if nulls == 0 {
+                continue;
+            }
+            let dt = schema.field(idx).data_type();
+            let scalar = Scalar::new(scalar_for(dt, value)?);
+            let mask = arrow::compute::is_null(cols[idx].as_ref())?;
+            cols[idx] = arrow::compute::kernels::zip::zip(&mask, &scalar, &cols[idx])?;
+            filled += nulls;
+        }
+        out.push(RecordBatch::try_new(schema.clone(), cols)?);
+    }
+    let rows = write_result(&io, schema, &out)?;
+    Ok(json!({
+        "dst": io.dst.display().to_string(),
+        "rows": rows,
+        "filled": filled,
+    }))
+}
+
 fn op_sort(args: Value) -> Result<Value> {
     let io = parse_io(&args)?;
     let by = args["by"]
@@ -1221,6 +1271,11 @@ pub extern "C" fn arrow__distinct(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn arrow__drop_nulls(args: *const c_char) -> *const c_char {
     ffi_call(args, op_drop_nulls)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__fill_null(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_fill_null)
 }
 
 #[no_mangle]
@@ -2126,6 +2181,71 @@ mod tests {
             "src": src.to_str().unwrap(), "src_format": "csv",
             "dst": dst.to_str().unwrap(), "dst_format": "csv",
             "columns": ["nope"],
+        }))
+        .is_err());
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+        let _ = std::fs::remove_file(dst2);
+    }
+
+    #[test]
+    fn op_fill_null_replaces_nulls_with_a_typed_constant() {
+        // score is empty (null) in row 2; id is never null.
+        let src = unique_csv("fillnull", "id,score\n1,10\n2,\n3,30\n");
+        let dst = dst_csv("fillnull");
+        let r = op_fill_null(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "columns": ["score"], "value": 0,
+        }))
+        .unwrap();
+        assert_eq!(
+            r["rows"].as_u64().unwrap(),
+            3,
+            "all rows kept (fill, not drop)"
+        );
+        assert_eq!(r["filled"].as_u64().unwrap(), 1, "one null cell filled");
+        let rows = read_back(&dst);
+        assert_eq!(
+            rows[1]["id"].as_i64().unwrap(),
+            2,
+            "the formerly-null row is still present"
+        );
+        assert_eq!(
+            rows[1]["score"].as_i64().unwrap(),
+            0,
+            "null score filled with 0"
+        );
+        assert_eq!(
+            rows[0]["score"].as_i64().unwrap(),
+            10,
+            "non-null score left untouched"
+        );
+        // A target column with no nulls is a no-op → filled 0.
+        let dst2 = dst_csv("fillnull2");
+        let r2 = op_fill_null(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst2.to_str().unwrap(), "dst_format": "csv",
+            "columns": ["id"], "value": -1,
+        }))
+        .unwrap();
+        assert_eq!(
+            r2["filled"].as_u64().unwrap(),
+            0,
+            "id has no nulls → nothing filled"
+        );
+        // Missing fill value errors rather than silently no-opping.
+        assert!(op_fill_null(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "columns": ["score"],
+        }))
+        .is_err());
+        // Unknown column errors.
+        assert!(op_fill_null(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "columns": ["nope"], "value": 0,
         }))
         .is_err());
         let _ = std::fs::remove_file(src);

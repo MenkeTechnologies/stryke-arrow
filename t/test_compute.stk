@@ -113,6 +113,16 @@ val $dn2 = Arrow::drop_nulls("$tmp/withnulls.parquet", "$tmp/clean2.parquet", ["
 assert_eq $dn2->{dropped}, 0, "drop_nulls: id is never null → nothing dropped"
 assert_dies fn { Arrow::drop_nulls("$tmp/withnulls.parquet", "$tmp/x.parquet", ["nope"]) }, "drop_nulls errors on a missing column"
 
+# ── fill_null (replace nulls with a typed constant) ──────────────────
+val $fn = Arrow::fill_null("$tmp/withnulls.parquet", "$tmp/filled.parquet", 0, ["score"])
+assert_eq $fn->{rows},   3, "fill_null: all rows kept (fill, not drop)"
+assert_eq $fn->{filled}, 1, "fill_null: one null cell filled"
+val @filled = Arrow::read("$tmp/filled.parquet")
+assert_eq join(",", map { $_->{score} } @filled), "10,0,30", "fill_null: null score became 0, others untouched"
+val $fn2 = Arrow::fill_null("$tmp/withnulls.parquet", "$tmp/filled2.parquet", -1, ["id"])
+assert_eq $fn2->{filled}, 0, "fill_null: id has no nulls → nothing filled"
+assert_dies fn { Arrow::fill_null("$tmp/withnulls.parquet", "$tmp/x.parquet", 0, ["nope"]) }, "fill_null errors on a missing column"
+
 # ── head / tail / slice ──────────────────────────────────────────────
 Arrow::head($src, "$tmp/head.parquet", 2)
 assert_eq Arrow::count("$tmp/head.parquet"), 2, "head 2 keeps 2 rows"
