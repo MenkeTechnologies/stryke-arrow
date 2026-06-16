@@ -360,6 +360,16 @@ fn Arrow::count ($path, %opts) {
     Arrow::_decode("count", arrow__count(to_json(\%req)))->{rows}
 }
 
+## Per-column null count as a hashref { null_counts => { col => n, … }, rows } —
+## the data-quality accessor (pandas isnull().sum(), polars null_count()).
+fn Arrow::null_counts ($path, %opts) {
+    val %req = (
+        src => $path,
+        format => $opts{format},
+    )
+    Arrow::_decode("null_counts", arrow__null_counts(to_json(\%req)))
+}
+
 
 # ── convenience composites ──────────────────────────────────────────
 #

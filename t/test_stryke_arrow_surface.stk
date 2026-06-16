@@ -85,6 +85,7 @@ assert_ok exists &Arrow::Parquet::stats, "Arrow::Parquet::stats exists"
 assert_ok exists &Arrow::Parquet::row_count, "Arrow::Parquet::row_count exists"
 assert_ok exists &Arrow::column_names, "Arrow::column_names exists"
 assert_ok exists &Arrow::column_count, "Arrow::column_count exists"
+assert_ok exists &Arrow::null_counts, "Arrow::null_counts exists"
 assert_ok exists &Arrow::is_empty, "Arrow::is_empty exists"
 
 test_run

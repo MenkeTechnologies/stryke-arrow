@@ -27,6 +27,13 @@ Arrow::write($src, \@rows)
 # ── count ────────────────────────────────────────────────────────────
 assert_eq Arrow::count($src), 5, "count returns source row total"
 
+# ── null_counts ──────────────────────────────────────────────────────
+val $nc = Arrow::null_counts($src)
+assert_eq $nc->{rows},               5, "null_counts: row total"
+assert_eq $nc->{null_counts}{id},    0, "null_counts: id column has no nulls"
+assert_eq $nc->{null_counts}{name},  0, "null_counts: name column has no nulls"
+assert_eq $nc->{null_counts}{score}, 0, "null_counts: score column has no nulls"
+
 # ── filter ───────────────────────────────────────────────────────────
 Arrow::filter($src, "$tmp/ge.parquet", "score", "ge", 70)
 val @ge = Arrow::read("$tmp/ge.parquet")

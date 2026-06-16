@@ -268,6 +268,9 @@ Cast columns via `{ column => type }` where type ∈ `int|int32|float|float32|st
 #### `Arrow::count(PATH, %opts) → $n`
 Row count read straight from the source, no JSON materialization.
 
+#### `Arrow::null_counts(PATH, %opts) → { null_counts => { col => n, … }, rows }`
+Per-column null count (pandas `isnull().sum()`, polars `null_count()`), accumulated from each column's native Arrow `null_count()` without materializing.
+
 ## [0x05] FFI Layer
 
 Each `Arrow::*` wrapper builds a JSON args dict and calls a sibling

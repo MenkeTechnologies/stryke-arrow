@@ -965,6 +965,41 @@ fn op_count(args: Value) -> Result<Value> {
     Ok(json!({"src": path.display().to_string(), "rows": rows}))
 }
 
+/// Per-column null count — the data-quality accessor (pandas `.isnull().sum()`,
+/// polars `.null_count()`). Streams the reader and accumulates each column's
+/// native Arrow `null_count()`, so nothing is materialized. opts: `src` (or
+/// `path`), optional `format`. Returns `{null_counts: {col: n, …}, rows}`.
+fn op_null_counts(args: Value) -> Result<Value> {
+    let path = args["src"]
+        .as_str()
+        .or_else(|| args["path"].as_str())
+        .ok_or_else(|| anyhow!("missing src"))?;
+    let path = Path::new(path);
+    let fmt = Fmt::from_override_or_path(args["format"].as_str(), path)?;
+    let reader = open_reader(path, fmt, None, 8192)?;
+    let names: Vec<String> = reader
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    let mut counts = vec![0usize; names.len()];
+    let mut rows = 0usize;
+    for b in reader {
+        let b = b?;
+        rows += b.num_rows();
+        for (i, col) in b.columns().iter().enumerate() {
+            counts[i] += col.null_count();
+        }
+    }
+    let map: serde_json::Map<String, Value> = names
+        .into_iter()
+        .zip(counts)
+        .map(|(n, c)| (n, json!(c)))
+        .collect();
+    Ok(json!({"src": path.display().to_string(), "rows": rows, "null_counts": map}))
+}
+
 fn op_concat(args: Value) -> Result<Value> {
     let dst = args["dst"].as_str().ok_or_else(|| anyhow!("missing dst"))?;
     let dst = Path::new(dst);
@@ -1196,6 +1231,11 @@ pub extern "C" fn arrow__tail(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn arrow__count(args: *const c_char) -> *const c_char {
     ffi_call(args, op_count)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__null_counts(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_null_counts)
 }
 
 #[no_mangle]
@@ -2185,6 +2225,24 @@ mod tests {
         let src = unique_csv("count", "id\n1\n2\n3\n4\n5\n");
         let r = op_count(json!({"src": src.to_str().unwrap(), "format": "csv"})).unwrap();
         assert_eq!(r["rows"].as_i64().unwrap(), 5);
+        let _ = std::fs::remove_file(src);
+    }
+
+    #[test]
+    fn op_null_counts_tallies_nulls_per_column() {
+        // Column a: 1 null (row 2); column b: 2 nulls (rows 1 and 3); c: none.
+        let src = unique_csv("nulls", "a,b,c\n1,,3\n,5,6\n7,,9\n10,11,12\n");
+        let r = op_null_counts(json!({"src": src.to_str().unwrap(), "format": "csv"})).unwrap();
+        assert_eq!(r["rows"].as_i64().unwrap(), 4, "four data rows");
+        assert_eq!(r["null_counts"]["a"].as_i64().unwrap(), 1, "a has one null");
+        assert_eq!(
+            r["null_counts"]["b"].as_i64().unwrap(),
+            2,
+            "b has two nulls"
+        );
+        assert_eq!(r["null_counts"]["c"].as_i64().unwrap(), 0, "c has no nulls");
+        // Missing src errors.
+        assert!(op_null_counts(json!({"format": "csv"})).is_err());
         let _ = std::fs::remove_file(src);
     }
 
