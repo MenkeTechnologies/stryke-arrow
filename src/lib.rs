@@ -769,6 +769,47 @@ fn op_filter_in(args: Value) -> Result<Value> {
     Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
 }
 
+/// Keep rows whose `column` value is NOT in the given `values` set — SQL
+/// `NOT IN`, the complement of `filter_in`. A null in the column is KEPT (it is
+/// not equal to any value), matching pandas `~Series.isin(...)` rather than
+/// SQL's three-valued logic. An empty value set keeps every row.
+fn op_filter_not_in(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?;
+    let values = args["values"]
+        .as_array()
+        .ok_or_else(|| anyhow!("missing values (array)"))?;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let idx = schema
+        .index_of(column)
+        .map_err(|_| anyhow!("filter_not_in: no column `{column}`"))?;
+    let dt = schema.field(idx).data_type().clone();
+    let scalar_arrays: Vec<ArrayRef> = values
+        .iter()
+        .map(|v| scalar_for(&dt, v))
+        .collect::<Result<_>>()?;
+    let mut out = Vec::with_capacity(batches.len());
+    for b in &batches {
+        let col = b.column(idx);
+        // in_mask[i] = true if col[i] equals any value (null where col[i] is null).
+        let mut in_mask = BooleanArray::from(vec![false; b.num_rows()]);
+        for sa in &scalar_arrays {
+            let eq = cmp::eq(col, &Scalar::new(sa.clone()))?;
+            in_mask = arrow::compute::or(&in_mask, &eq)?;
+        }
+        // Keep the complement; `not` leaves nulls null, so OR in `is_null(col)`
+        // (Kleene, null-aware) to keep null rows — the pandas `~isin` behaviour.
+        let not_in = arrow::compute::not(&in_mask)?;
+        let is_null = arrow::compute::is_null(col.as_ref())?;
+        let keep = arrow::compute::or_kleene(&not_in, &is_null)?;
+        out.push(filter_record_batch(b, &keep)?);
+    }
+    let rows = write_result(&io, schema, &out)?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
+}
+
 fn op_select(args: Value) -> Result<Value> {
     let io = parse_io(&args)?;
     let cols = parse_columns(&args["columns"])
@@ -1292,6 +1333,11 @@ pub extern "C" fn arrow__filter(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn arrow__filter_in(args: *const c_char) -> *const c_char {
     ffi_call(args, op_filter_in)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__filter_not_in(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_filter_not_in)
 }
 
 #[no_mangle]
@@ -2156,6 +2202,68 @@ mod tests {
         }))
         .is_err());
         for p in [&src, &dst, &dst2, &dst3, &dst4] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn op_filter_not_in_keeps_the_complement_and_keeps_nulls() {
+        let src = unique_csv("filternotin", "id,name\n1,a\n2,b\n3,c\n4,d\n5,e\n");
+        // NOT IN {1,3,5} keeps exactly 2 and 4, in order.
+        let dst = dst_csv("filternotin");
+        let r = op_filter_not_in(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "column": "id", "values": [1, 3, 5],
+        }))
+        .unwrap();
+        assert_eq!(r["rows"].as_i64().unwrap(), 2);
+        let ids: Vec<i64> = read_back(&dst)
+            .iter()
+            .map(|x| x["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![2, 4]);
+        // It is the exact complement of filter_in on the same set (5 = 3 + 2).
+        let din = dst_csv("filternotin_in");
+        let rin = op_filter_in(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": din.to_str().unwrap(), "dst_format": "csv",
+            "column": "id", "values": [1, 3, 5],
+        }))
+        .unwrap();
+        assert_eq!(
+            rin["rows"].as_i64().unwrap() + r["rows"].as_i64().unwrap(),
+            5
+        );
+        // An empty value set keeps every row (NOT IN () is always true).
+        let dempty = dst_csv("filternotin_empty");
+        let re = op_filter_not_in(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dempty.to_str().unwrap(), "dst_format": "csv",
+            "column": "id", "values": [],
+        }))
+        .unwrap();
+        assert_eq!(re["rows"].as_i64().unwrap(), 5);
+        // A null in the column is KEPT (pandas ~isin), even when its value would
+        // otherwise be excluded by the set.
+        let nsrc = unique_csv("filternotin_null", "id,name\n1,a\n,b\n3,c\n");
+        let ndst = dst_csv("filternotin_null");
+        let rn = op_filter_not_in(json!({
+            "src": nsrc.to_str().unwrap(), "src_format": "csv",
+            "dst": ndst.to_str().unwrap(), "dst_format": "csv",
+            "column": "id", "values": [1],
+        }))
+        .unwrap();
+        // From {1, null, 3}: NOT IN {1} keeps null and 3 → 2 rows.
+        assert_eq!(rn["rows"].as_i64().unwrap(), 2, "null row is kept");
+        // Unknown column errors.
+        assert!(op_filter_not_in(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "column": "nope", "values": [1],
+        }))
+        .is_err());
+        for p in [&src, &dst, &din, &dempty, &nsrc, &ndst] {
             let _ = std::fs::remove_file(p);
         }
     }

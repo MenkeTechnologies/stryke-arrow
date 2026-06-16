@@ -235,6 +235,9 @@ typed against the column (int/float/string/bool).
 #### `Arrow::filter_in(SRC, DST, COLUMN, \@values, %opts) → { dst, rows }`
 Keep rows where `COLUMN` is in `\@values` — SQL `IN`. Each value is typed against the column; an empty set matches no rows. Unknown column errors.
 
+#### `Arrow::filter_not_in(SRC, DST, COLUMN, \@values, %opts) → { dst, rows }`
+Keep rows where `COLUMN` is NOT in `\@values` — SQL `NOT IN`, the complement of `filter_in`. A null is kept (matches nothing, like pandas `~isin`); an empty set keeps every row. Unknown column errors.
+
 #### `Arrow::select(SRC, DST, \@cols, %opts) → { dst, rows, columns }`
 Project and reorder to `\@cols` (output order = request order).
 

@@ -196,6 +196,23 @@ fn Arrow::filter_in ($src, $dst, $column, $values, %opts) {
     Arrow::_decode("filter_in", arrow__filter_in(to_json(\%req)))
 }
 
+## Keep rows where $column is NOT in $values (an arrayref) — SQL NOT IN, the
+## complement of filter_in. A null value is kept (it matches nothing), like
+## pandas ~isin; an empty set keeps every row.
+fn Arrow::filter_not_in ($src, $dst, $column, $values, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        column => $column,
+        values => $values,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("filter_not_in", arrow__filter_not_in(to_json(\%req)))
+}
+
 ## Project/reorder columns. $cols is an arrayref of names in output order.
 fn Arrow::select ($src, $dst, $cols, %opts) {
     val %req = (
