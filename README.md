@@ -250,6 +250,9 @@ Drop duplicate rows, keeping the first occurrence of each distinct row in input 
 #### `Arrow::drop_nulls(SRC, DST, \@cols?, %opts) → { dst, rows, dropped }`
 Drop rows that are null in any of `\@cols` (omit to check every column). A row survives only when all target columns are present. `dropped` is the number removed. Unknown column names error.
 
+#### `Arrow::keep_nulls(SRC, DST, \@cols?, %opts) → { dst, rows, dropped }`
+The complement of `drop_nulls`: keep only rows that are null in at least one of `\@cols` (omit for any column), for isolating the incomplete rows. `dropped` is the number of fully-populated rows removed. Unknown column names error.
+
 #### `Arrow::fill_null(SRC, DST, VALUE, \@cols?, %opts) → { dst, rows, filled }`
 Fill nulls in `\@cols` (omit for every column) with the constant `VALUE`, typed to match each column (integer/float/string/bool). The fill companion to `drop_nulls` — row count is unchanged; `filled` is the number of null cells replaced. Unknown column names error.
 

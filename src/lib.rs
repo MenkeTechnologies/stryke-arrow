@@ -936,6 +936,45 @@ fn op_drop_nulls(args: Value) -> Result<Value> {
     }))
 }
 
+/// Keep only rows that have a null in at least one of the given `columns`
+/// (default: any column) — the exact complement of `drop_nulls`, for isolating
+/// the incomplete rows. The per-batch mask ORs `is_null` across the target
+/// columns (vs `drop_nulls`, which ANDs `is_not_null`). `dropped` is the number
+/// of fully-populated rows removed. Pure transform.
+fn op_keep_nulls(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let names: Vec<String> = match parse_columns(&args["columns"]) {
+        Some(c) if !c.is_empty() => c,
+        _ => schema.fields().iter().map(|f| f.name().clone()).collect(),
+    };
+    let indices: Vec<usize> = names
+        .iter()
+        .map(|c| {
+            schema
+                .index_of(c)
+                .map_err(|_| anyhow!("keep_nulls: no column `{c}`"))
+        })
+        .collect::<Result<_>>()?;
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    let mut out = Vec::with_capacity(batches.len());
+    for b in &batches {
+        let mut mask = BooleanArray::from(vec![false; b.num_rows()]);
+        for &idx in &indices {
+            let is_null = arrow::compute::is_null(b.column(idx).as_ref())?;
+            mask = arrow::compute::or(&mask, &is_null)?;
+        }
+        out.push(filter_record_batch(b, &mask)?);
+    }
+    let kept: usize = out.iter().map(|b| b.num_rows()).sum();
+    let rows = write_result(&io, schema, &out)?;
+    Ok(json!({
+        "dst": io.dst.display().to_string(),
+        "rows": rows,
+        "dropped": total - kept,
+    }))
+}
+
 /// Fill nulls in the given `columns` (default: every column) with a constant
 /// `value`, typed to match each column — the fill companion to `drop_nulls`
 /// (which removes null rows instead). `value` is coerced to each target column's
@@ -1427,6 +1466,11 @@ pub extern "C" fn arrow__distinct(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn arrow__drop_nulls(args: *const c_char) -> *const c_char {
     ffi_call(args, op_drop_nulls)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__keep_nulls(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_keep_nulls)
 }
 
 #[no_mangle]
@@ -2472,6 +2516,56 @@ mod tests {
         assert_eq!(r2["dropped"].as_u64().unwrap(), 0);
         // An unknown column name errors rather than silently no-opping.
         assert!(op_drop_nulls(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "columns": ["nope"],
+        }))
+        .is_err());
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+        let _ = std::fs::remove_file(dst2);
+    }
+
+    #[test]
+    fn op_keep_nulls_is_the_complement_of_drop_nulls() {
+        // score is null in row 2; id is never null.
+        let src = unique_csv("keepnulls", "id,score\n1,10\n2,\n3,30\n");
+        let dst = dst_csv("keepnulls");
+        // Default (any column): only the row with a null survives.
+        let r = op_keep_nulls(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+        }))
+        .unwrap();
+        assert_eq!(
+            r["rows"].as_u64().unwrap(),
+            1,
+            "only the incomplete row survives"
+        );
+        assert_eq!(
+            r["dropped"].as_u64().unwrap(),
+            2,
+            "2 fully-populated rows removed"
+        );
+        let rows = read_back(&dst);
+        assert_eq!(rows[0]["id"].as_i64().unwrap(), 2);
+        // Targeting only a never-null column keeps nothing (the complement of
+        // drop_nulls keeping everything).
+        let dst2 = dst_csv("keepnulls2");
+        let r2 = op_keep_nulls(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst2.to_str().unwrap(), "dst_format": "csv",
+            "columns": ["id"],
+        }))
+        .unwrap();
+        assert_eq!(
+            r2["rows"].as_u64().unwrap(),
+            0,
+            "id is never null → nothing kept"
+        );
+        assert_eq!(r2["dropped"].as_u64().unwrap(), 3);
+        // An unknown column name errors.
+        assert!(op_keep_nulls(json!({
             "src": src.to_str().unwrap(), "src_format": "csv",
             "dst": dst.to_str().unwrap(), "dst_format": "csv",
             "columns": ["nope"],

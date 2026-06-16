@@ -272,6 +272,22 @@ fn Arrow::drop_nulls ($src, $dst, $cols = undef, %opts) {
     Arrow::_decode("drop_nulls", arrow__drop_nulls(to_json(\%req)))
 }
 
+## Keep only rows that are null in at least one of $cols (an arrayref of names;
+## omit or pass undef for any column) — the complement of drop_nulls, for
+## isolating the incomplete rows. Returns { dst, rows, dropped }.
+fn Arrow::keep_nulls ($src, $dst, $cols = undef, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        columns => $cols,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("keep_nulls", arrow__keep_nulls(to_json(\%req)))
+}
+
 ## Fill nulls in $cols (an arrayref of names; omit or pass undef for every
 ## column) with the constant $value, typed to match each column — the fill
 ## companion to drop_nulls. Row count is unchanged. Returns { dst, rows, filled }.
