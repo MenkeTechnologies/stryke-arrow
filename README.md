@@ -232,6 +232,9 @@ accept `src_format`, `dst_format`, `compression`, `row_group` in `%opts`;
 Keep rows where `COLUMN OP VALUE`. `OP` ∈ `eq|ne|lt|le|gt|ge`. `VALUE` is
 typed against the column (int/float/string/bool).
 
+#### `Arrow::filter_in(SRC, DST, COLUMN, \@values, %opts) → { dst, rows }`
+Keep rows where `COLUMN` is in `\@values` — SQL `IN`. Each value is typed against the column; an empty set matches no rows. Unknown column errors.
+
 #### `Arrow::select(SRC, DST, \@cols, %opts) → { dst, rows, columns }`
 Project and reorder to `\@cols` (output order = request order).
 

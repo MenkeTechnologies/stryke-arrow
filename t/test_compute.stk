@@ -51,6 +51,14 @@ val @bob = Arrow::read("$tmp/bob.parquet")
 assert_eq scalar(@bob), 1, "string-eq filter matches exactly one"
 assert_eq $bob[0]->{id}, 2, "string-eq filter kept the right row"
 
+# ── filter_in (SQL IN) ───────────────────────────────────────────────
+val $fin = Arrow::filter_in($src, "$tmp/in.parquet", "id", [1, 3])
+assert_eq $fin->{rows}, 2, "filter_in keeps the listed ids"
+# Source order is preserved (rows are written 3,1,4,2,5), so the kept ids are 3,1.
+assert_eq join(",", map { $_->{id} } Arrow::read("$tmp/in.parquet")), "3,1", "filter_in: keeps ids 1 and 3 in source order"
+assert_eq Arrow::filter_in($src, "$tmp/none.parquet", "id", [])->{rows}, 0, "filter_in: empty set matches nothing"
+assert_dies fn { Arrow::filter_in($src, "$tmp/x.parquet", "nope", [1]) }, "filter_in errors on a missing column"
+
 # ── sort descending ──────────────────────────────────────────────────
 Arrow::sort($src, "$tmp/sorted.parquet", [{ column => "score", descending => 1 }])
 val @sorted = Arrow::read("$tmp/sorted.parquet")

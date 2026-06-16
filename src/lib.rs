@@ -733,6 +733,42 @@ fn op_filter(args: Value) -> Result<Value> {
     Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
 }
 
+/// Keep rows whose `column` value is in the `values` set — SQL `IN (...)`. Each
+/// value is coerced to the column's type via the same `scalar_for` path as
+/// `filter`, and a row matches when it equals any of them (the per-value equality
+/// masks are OR'd). An empty `values` set matches no rows. opts: `column`,
+/// `values` (array). Returns the surviving row count. Pure transform.
+fn op_filter_in(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?;
+    let values = args["values"]
+        .as_array()
+        .ok_or_else(|| anyhow!("missing values (array)"))?;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let idx = schema
+        .index_of(column)
+        .map_err(|_| anyhow!("filter_in: no column `{column}`"))?;
+    let dt = schema.field(idx).data_type().clone();
+    let scalar_arrays: Vec<ArrayRef> = values
+        .iter()
+        .map(|v| scalar_for(&dt, v))
+        .collect::<Result<_>>()?;
+    let mut out = Vec::with_capacity(batches.len());
+    for b in &batches {
+        let col = b.column(idx);
+        let mut mask = BooleanArray::from(vec![false; b.num_rows()]);
+        for sa in &scalar_arrays {
+            let eq = cmp::eq(col, &Scalar::new(sa.clone()))?;
+            mask = arrow::compute::or(&mask, &eq)?;
+        }
+        out.push(filter_record_batch(b, &mask)?);
+    }
+    let rows = write_result(&io, schema, &out)?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
+}
+
 fn op_select(args: Value) -> Result<Value> {
     let io = parse_io(&args)?;
     let cols = parse_columns(&args["columns"])
@@ -1251,6 +1287,11 @@ pub extern "C" fn arrow__convert(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn arrow__filter(args: *const c_char) -> *const c_char {
     ffi_call(args, op_filter)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__filter_in(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_filter_in)
 }
 
 #[no_mangle]
@@ -2051,6 +2092,72 @@ mod tests {
         assert!(rows.iter().all(|r| r["name"].as_str() == Some("keep")));
         let _ = std::fs::remove_file(src);
         let _ = std::fs::remove_file(dst);
+    }
+
+    #[test]
+    fn op_filter_in_keeps_rows_matching_the_value_set() {
+        let src = unique_csv("filterin", "id,name\n1,a\n2,b\n3,c\n4,d\n5,e\n");
+        // Integer IN set keeps exactly the listed ids, in order.
+        let dst = dst_csv("filterin");
+        let r = op_filter_in(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "column": "id", "values": [1, 3, 5],
+        }))
+        .unwrap();
+        assert_eq!(r["rows"].as_i64().unwrap(), 3);
+        let ids: Vec<i64> = read_back(&dst)
+            .iter()
+            .map(|x| x["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![1, 3, 5]);
+        // String IN set.
+        let dst2 = dst_csv("filterin2");
+        op_filter_in(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst2.to_str().unwrap(), "dst_format": "csv",
+            "column": "name", "values": ["b", "d"],
+        }))
+        .unwrap();
+        let names: Vec<String> = read_back(&dst2)
+            .iter()
+            .map(|x| x["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, vec!["b", "d"]);
+        // An empty value set matches no rows.
+        let dst3 = dst_csv("filterin3");
+        let e = op_filter_in(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst3.to_str().unwrap(), "dst_format": "csv",
+            "column": "id", "values": [],
+        }))
+        .unwrap();
+        assert_eq!(e["rows"].as_i64().unwrap(), 0);
+        // A single value behaves like filter eq.
+        let dst4 = dst_csv("filterin4");
+        op_filter_in(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst4.to_str().unwrap(), "dst_format": "csv",
+            "column": "id", "values": [2],
+        }))
+        .unwrap();
+        assert_eq!(read_back(&dst4).len(), 1);
+        // Unknown column / missing values error.
+        assert!(op_filter_in(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "column": "nope", "values": [1],
+        }))
+        .is_err());
+        assert!(op_filter_in(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "column": "id",
+        }))
+        .is_err());
+        for p in [&src, &dst, &dst2, &dst3, &dst4] {
+            let _ = std::fs::remove_file(p);
+        }
     }
 
     #[test]
