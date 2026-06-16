@@ -262,6 +262,9 @@ Lexicographic sort. `\@by` is `[{ column => NAME, descending => 1, nulls_first =
 #### `Arrow::reverse(SRC, DST, %opts) → { dst, rows }`
 Reverse the row order (last row first), independent of any sort key — just flips whatever order the rows are already in. A double reverse is the identity.
 
+#### `Arrow::gather(SRC, DST, \@indices, %opts) → { dst, rows }`
+Select rows by an explicit list of 0-based indices (polars `gather` / pandas `.iloc[[…]]`). Unlike `slice` (a contiguous window), the index list is arbitrary: it may repeat a row and emits rows in the order given. Out-of-range indices die.
+
 #### `Arrow::head(SRC, DST, N, %opts)` / `Arrow::tail(SRC, DST, N, %opts) → { dst, rows }`
 First / last `N` rows.
 

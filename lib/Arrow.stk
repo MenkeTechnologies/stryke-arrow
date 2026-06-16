@@ -333,6 +333,23 @@ fn Arrow::reverse ($src, $dst, %opts) {
     Arrow::_decode("reverse", arrow__reverse(to_json(\%req)))
 }
 
+## Select rows by an explicit list of 0-based indices (polars gather / pandas
+## .iloc[[…]]). Unlike slice (a contiguous window), the index list is arbitrary:
+## it may repeat a row and emits rows in the order given. Out-of-range indices
+## die. $indices is an arrayref of row numbers. Returns { dst, rows }.
+fn Arrow::gather ($src, $dst, $indices, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        indices => $indices,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("gather", arrow__gather(to_json(\%req)))
+}
+
 ## First $n rows.
 fn Arrow::head ($src, $dst, $n, %opts) {
     val %req = (

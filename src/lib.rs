@@ -1086,6 +1086,44 @@ fn op_reverse(args: Value) -> Result<Value> {
     Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
 }
 
+/// Select rows by an explicit list of 0-based indices — polars `gather`, pandas
+/// `.iloc[[…]]`. Distinct from `slice` (a contiguous window), `head`/`tail` (the
+/// ends) and `filter` (a predicate): the index list is arbitrary, may repeat a
+/// row, and emits rows in exactly the order given. The source is materialized,
+/// each index is bounds-checked against the row count (out-of-range dies), then
+/// every column is taken by the same index array. opts: `src` (or `path`),
+/// `dst`, formats, `indices` (array of row indices). Returns `{dst, rows}`.
+fn op_gather(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let indices = args["indices"]
+        .as_array()
+        .ok_or_else(|| anyhow!("missing indices (array of 0-based row numbers)"))?;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let merged = concat_batches(&schema, &batches)?;
+    let n = merged.num_rows() as u64;
+    let take_idx: Vec<u32> = indices
+        .iter()
+        .map(|v| -> Result<u32> {
+            let i = v
+                .as_u64()
+                .ok_or_else(|| anyhow!("gather: each index must be a non-negative integer"))?;
+            if i >= n {
+                return Err(anyhow!("gather: index {i} out of range (rows: {n})"));
+            }
+            Ok(i as u32)
+        })
+        .collect::<Result<_>>()?;
+    let idx = arrow::array::UInt32Array::from(take_idx);
+    let cols: Vec<ArrayRef> = merged
+        .columns()
+        .iter()
+        .map(|c| take(c, &idx, None))
+        .collect::<std::result::Result<_, _>>()?;
+    let gathered = RecordBatch::try_new(schema.clone(), cols)?;
+    let rows = write_result(&io, schema, &[gathered])?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
+}
+
 fn op_slice(args: Value) -> Result<Value> {
     let io = parse_io(&args)?;
     let offset = args["offset"].as_u64().unwrap_or(0) as usize;
@@ -1486,6 +1524,11 @@ pub extern "C" fn arrow__sort(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn arrow__reverse(args: *const c_char) -> *const c_char {
     ffi_call(args, op_reverse)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__gather(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_gather)
 }
 
 #[no_mangle]
@@ -2690,6 +2733,40 @@ mod tests {
         let _ = std::fs::remove_file(src);
         let _ = std::fs::remove_file(dst);
         let _ = std::fs::remove_file(dst2);
+    }
+
+    #[test]
+    fn op_gather_takes_rows_by_explicit_index_list() {
+        let src = unique_csv("gather", "id\n10\n20\n30\n40\n50\n");
+        let dst = dst_csv("gather");
+        // Arbitrary order, a repeat, and a subset — none of which slice/head/tail
+        // can express.
+        let r = op_gather(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "indices": [4, 0, 2, 2],
+        }))
+        .unwrap();
+        assert_eq!(r["rows"].as_u64().unwrap(), 4, "row count = index count");
+        let ids: Vec<i64> = read_back(&dst)
+            .iter()
+            .map(|r| r["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![50, 10, 30, 30],
+            "rows follow the index list exactly"
+        );
+        // Out-of-range index dies.
+        let dst2 = dst_csv("gather_oob");
+        let err = op_gather(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst2.to_str().unwrap(), "dst_format": "csv",
+            "indices": [0, 5],
+        }));
+        assert!(err.is_err(), "index 5 is out of range for 5 rows");
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
     }
 
     #[test]

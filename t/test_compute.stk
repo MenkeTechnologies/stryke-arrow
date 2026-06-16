@@ -82,6 +82,13 @@ assert_eq join(",", map { $_->{id} } @rev), "5,2,4,1,3", "reverse: input order 3
 Arrow::reverse("$tmp/reversed.parquet", "$tmp/reversed2.parquet")
 assert_eq join(",", map { $_->{id} } Arrow::read("$tmp/reversed2.parquet")), "3,1,4,2,5", "reverse: double reverse is identity"
 
+# ── gather (rows by explicit index list) ─────────────────────────────
+# $src id column is in input order 3,1,4,2,5.
+val $gv = Arrow::gather($src, "$tmp/gathered.parquet", [4, 0, 2, 2])
+assert_eq $gv->{rows}, 4, "gather: row count = index count"
+assert_eq join(",", map { $_->{id} } Arrow::read("$tmp/gathered.parquet")), "5,3,4,4", "gather: rows follow the index list (repeat allowed)"
+assert_dies fn { Arrow::gather($src, "$tmp/oob.parquet", [0, 5]) }, "gather: index 5 out of range for 5 rows dies"
+
 # ── select (reorder + drop) ──────────────────────────────────────────
 Arrow::select($src, "$tmp/cols.parquet", ["name", "id"])
 val @cols = Arrow::read("$tmp/cols.parquet")
