@@ -1077,6 +1077,29 @@ fn op_tail(args: Value) -> Result<Value> {
     Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
 }
 
+/// Prepend a 0-based row-index column — polars `with_row_index` / pandas
+/// `reset_index`. The source is materialized (the index spans every batch), a
+/// non-null `UInt64` column `offset..offset+n` is built, and it is prepended to
+/// the schema and columns. opts: `src` (or `path`), `dst`, formats, `name`
+/// (default `"index"`), `offset` (default 0). Returns `{dst, rows}`.
+fn op_with_row_index(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let name = args["name"].as_str().unwrap_or("index");
+    let offset = args["offset"].as_u64().unwrap_or(0);
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let merged = concat_batches(&schema, &batches)?;
+    let n = merged.num_rows() as u64;
+    let idx = arrow::array::UInt64Array::from_iter_values(offset..offset + n);
+    let mut fields: Vec<Arc<Field>> = vec![Arc::new(Field::new(name, DataType::UInt64, false))];
+    fields.extend(schema.fields().iter().cloned());
+    let new_schema = Arc::new(Schema::new(fields));
+    let mut cols: Vec<ArrayRef> = vec![Arc::new(idx)];
+    cols.extend(merged.columns().iter().cloned());
+    let out = RecordBatch::try_new(new_schema.clone(), cols)?;
+    let rows = write_result(&io, new_schema, &[out])?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
+}
+
 fn op_count(args: Value) -> Result<Value> {
     let path = args["src"]
         .as_str()
@@ -1388,6 +1411,11 @@ pub extern "C" fn arrow__head(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn arrow__tail(args: *const c_char) -> *const c_char {
     ffi_call(args, op_tail)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__with_row_index(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_with_row_index)
 }
 
 #[no_mangle]
@@ -2576,6 +2604,41 @@ mod tests {
             vec![3, 4, 5]
         );
         for p in [src, h, t, s] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn op_with_row_index_prepends_a_zero_based_index_column() {
+        let src = unique_csv("rowidx", "id\n10\n20\n30\n");
+        // Default: a column named `index` running 0..n, original columns kept.
+        let d = dst_csv("rowidx_out");
+        op_with_row_index(json!({"src": src.to_str().unwrap(), "src_format":"csv", "dst": d.to_str().unwrap(), "dst_format":"csv"})).unwrap();
+        let rows = read_back(&d);
+        assert_eq!(
+            rows.iter()
+                .map(|r| r["index"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|r| r["id"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![10, 20, 30],
+            "original column is preserved"
+        );
+        // Custom name + non-zero offset.
+        let d2 = dst_csv("rowidx_named");
+        op_with_row_index(json!({"src": src.to_str().unwrap(), "src_format":"csv", "dst": d2.to_str().unwrap(), "dst_format":"csv", "name":"row_nr", "offset": 100})).unwrap();
+        assert_eq!(
+            read_back(&d2)
+                .iter()
+                .map(|r| r["row_nr"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![100, 101, 102]
+        );
+        for p in [src, d, d2] {
             let _ = std::fs::remove_file(p);
         }
     }

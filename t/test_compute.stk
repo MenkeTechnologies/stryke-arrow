@@ -152,6 +152,19 @@ val @slice = Arrow::read("$tmp/slice.parquet")
 assert_eq scalar(@slice), 2, "slice(1,2) yields 2 rows"
 assert_eq $slice[0]->{id}, 1, "slice(1,2) starts at offset 1 (id=1)"
 
+# ── with_row_index ───────────────────────────────────────────────────
+Arrow::with_row_index($src, "$tmp/idx.parquet")
+val @idx = Arrow::read("$tmp/idx.parquet")
+assert_eq scalar(@idx), 5,        "with_row_index preserves the row count"
+assert_eq $idx[0]->{index}, 0,    "with_row_index starts at 0"
+assert_eq $idx[4]->{index}, 4,    "with_row_index ends at n-1"
+assert_eq $idx[0]->{id}, 3,       "with_row_index keeps original columns in row order"
+
+Arrow::with_row_index($src, "$tmp/idx2.parquet", name => "row_nr", offset => 100)
+val @idx2 = Arrow::read("$tmp/idx2.parquet")
+assert_eq $idx2[0]->{row_nr}, 100, "with_row_index honors a custom name + offset"
+assert_eq $idx2[4]->{row_nr}, 104, "with_row_index offset increments across rows"
+
 # ── concat ───────────────────────────────────────────────────────────
 Arrow::head($src, "$tmp/a.parquet", 2)
 Arrow::tail($src, "$tmp/b.parquet", 2)

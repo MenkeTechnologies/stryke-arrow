@@ -345,6 +345,23 @@ fn Arrow::tail ($src, $dst, $n, %opts) {
     Arrow::_decode("tail", arrow__tail(to_json(\%req)))
 }
 
+## Prepend a 0-based row-index column (polars with_row_index / pandas
+## reset_index). opts: name (default "index"), offset (default 0), plus the usual
+## src_format/dst_format/compression/row_group. Returns { dst, rows }.
+fn Arrow::with_row_index ($src, $dst, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        name => $opts{name},
+        offset => $opts{offset},
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("with_row_index", arrow__with_row_index(to_json(\%req)))
+}
+
 ## Rows in the half-open window [$offset, $offset+$length).
 fn Arrow::slice ($src, $dst, $offset, $length, %opts) {
     val %req = (

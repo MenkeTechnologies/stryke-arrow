@@ -265,6 +265,9 @@ First / last `N` rows.
 #### `Arrow::slice(SRC, DST, OFFSET, LENGTH, %opts) → { dst, rows }`
 Half-open row window `[OFFSET, OFFSET+LENGTH)`.
 
+#### `Arrow::with_row_index(SRC, DST, %opts) → { dst, rows }`
+Prepend a 0-based `UInt64` row-index column (polars `with_row_index` / pandas `reset_index`). `opts`: `name` (default `index`), `offset` (default `0`).
+
 #### `Arrow::concat(\@srcs, DST, %opts) → { dst, rows, sources }`
 Concatenate sources with identical schemas into one `DST`.
 
