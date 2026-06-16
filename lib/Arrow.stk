@@ -390,6 +390,25 @@ fn Arrow::concat ($srcs, $dst, %opts) {
     Arrow::_decode("concat", arrow__concat(to_json(\%req)))
 }
 
+## Horizontally stack $other's columns onto $src into $dst — the column-wise
+## counterpart of concat (which appends rows). Both files must have the same row
+## count; output is $src's columns then $other's, and a column-name collision is
+## rejected. opts: src_format, other_format, dst_format, compression, row_group.
+## Returns { dst, rows, columns }.
+fn Arrow::hstack ($src, $other, $dst, %opts) {
+    val %req = (
+        src => $src,
+        other => $other,
+        dst => $dst,
+        src_format => $opts{src_format},
+        other_format => $opts{other_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("hstack", arrow__hstack(to_json(\%req)))
+}
+
 ## Rename columns. $map is { old => new }; unmapped columns pass through.
 fn Arrow::rename ($src, $dst, $map, %opts) {
     val %req = (

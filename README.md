@@ -271,6 +271,9 @@ Prepend a 0-based `UInt64` row-index column (polars `with_row_index` / pandas `r
 #### `Arrow::concat(\@srcs, DST, %opts) → { dst, rows, sources }`
 Concatenate sources with identical schemas into one `DST`.
 
+#### `Arrow::hstack(SRC, OTHER, DST, %opts) → { dst, rows, columns }`
+Horizontally stack `OTHER`'s columns onto `SRC` — the column-wise counterpart of `concat`. Both files must have the same row count; a column-name collision is rejected.
+
 #### `Arrow::rename(SRC, DST, \%map, %opts) → { dst, rows }`
 Rename columns via `{ old => new }`; unmapped columns pass through.
 

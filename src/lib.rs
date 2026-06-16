@@ -1209,6 +1209,52 @@ fn op_concat(args: Value) -> Result<Value> {
     Ok(json!({"dst": dst.display().to_string(), "rows": rows, "sources": srcs.len()}))
 }
 
+/// Horizontally stack a second file's columns onto `src` — the column-wise
+/// counterpart of `concat` (which appends rows). Both files must have the same
+/// row count; the output is `src`'s columns followed by `other`'s, and a
+/// column-name collision is rejected (a later selector couldn't disambiguate it).
+/// opts: `src` (or `path`), `other` (the second source, required), `dst`, formats.
+/// Returns `{dst, rows, columns}`.
+fn op_hstack(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let other = args["other"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing other (the second source)"))?;
+    let other_path = Path::new(other);
+    let other_fmt = Fmt::from_override_or_path(args["other_format"].as_str(), other_path)?;
+    let (lschema, lbatches) = read_all(&io.src, io.src_fmt, None)?;
+    let (rschema, rbatches) = read_all(other_path, other_fmt, None)?;
+    let left = concat_batches(&lschema, &lbatches)?;
+    let right = concat_batches(&rschema, &rbatches)?;
+    if left.num_rows() != right.num_rows() {
+        return Err(anyhow!(
+            "hstack: row counts differ ({} vs {})",
+            left.num_rows(),
+            right.num_rows()
+        ));
+    }
+    // Combine fields left-then-right; a duplicate column name is rejected.
+    let mut seen = std::collections::HashSet::new();
+    let mut fields: Vec<Arc<Field>> = Vec::new();
+    for f in lschema.fields().iter().chain(rschema.fields().iter()) {
+        if !seen.insert(f.name().clone()) {
+            return Err(anyhow!("hstack: duplicate column name `{}`", f.name()));
+        }
+        fields.push(f.clone());
+    }
+    let new_schema = Arc::new(Schema::new(fields));
+    let mut cols: Vec<ArrayRef> = left.columns().to_vec();
+    cols.extend(right.columns().iter().cloned());
+    let out = RecordBatch::try_new(new_schema.clone(), cols)?;
+    let kept: Vec<String> = new_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    let rows = write_result(&io, new_schema, &[out])?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows, "columns": kept}))
+}
+
 fn op_rename(args: Value) -> Result<Value> {
     let io = parse_io(&args)?;
     let map = args["map"]
@@ -1436,6 +1482,11 @@ pub extern "C" fn arrow__shape(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn arrow__concat(args: *const c_char) -> *const c_char {
     ffi_call(args, op_concat)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__hstack(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_hstack)
 }
 
 #[no_mangle]
@@ -2701,6 +2752,56 @@ mod tests {
             .collect();
         assert_eq!(ids, vec![1, 2, 3, 4]);
         for p in [a, b, dst] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn op_hstack_appends_columns_at_matching_row_count() {
+        let left = unique_csv("hsl", "id\n1\n2\n3\n");
+        let right = unique_csv("hsr", "name\na\nb\nc\n");
+        let dst = dst_csv("hstack");
+        let r = op_hstack(json!({
+            "src": left.to_str().unwrap(), "src_format": "csv",
+            "other": right.to_str().unwrap(), "other_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+        }))
+        .unwrap();
+        assert_eq!(r["rows"].as_i64().unwrap(), 3);
+        assert_eq!(
+            r["columns"],
+            json!(["id", "name"]),
+            "src cols then other cols"
+        );
+        // Each row carries both columns, aligned.
+        let rows = read_back(&dst);
+        assert_eq!(rows[0]["id"].as_i64().unwrap(), 1);
+        assert_eq!(rows[0]["name"].as_str().unwrap(), "a");
+        assert_eq!(rows[2]["name"].as_str().unwrap(), "c");
+        // Mismatched row counts and a duplicate column name both error.
+        let short = unique_csv("hss", "name\nx\n");
+        assert!(op_hstack(json!({
+            "src": left.to_str().unwrap(), "src_format": "csv",
+            "other": short.to_str().unwrap(), "other_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+        }))
+        .is_err());
+        assert!(
+            op_hstack(json!({
+                "src": left.to_str().unwrap(), "src_format": "csv",
+                "other": left.to_str().unwrap(), "other_format": "csv",
+                "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            }))
+            .is_err(),
+            "duplicate column `id`"
+        );
+        // Missing `other` errors.
+        assert!(op_hstack(json!({
+            "src": left.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+        }))
+        .is_err());
+        for p in [left, right, short, dst] {
             let _ = std::fs::remove_file(p);
         }
     }
