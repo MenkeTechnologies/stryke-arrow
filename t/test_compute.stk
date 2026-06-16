@@ -34,6 +34,11 @@ assert_eq $nc->{null_counts}{id},    0, "null_counts: id column has no nulls"
 assert_eq $nc->{null_counts}{name},  0, "null_counts: name column has no nulls"
 assert_eq $nc->{null_counts}{score}, 0, "null_counts: score column has no nulls"
 
+# ── shape ────────────────────────────────────────────────────────────
+val $shape = Arrow::shape($src)
+assert_eq $shape->{rows},    5, "shape: row count (id,name,score × 5)"
+assert_eq $shape->{columns}, 3, "shape: column count"
+
 # ── filter ───────────────────────────────────────────────────────────
 Arrow::filter($src, "$tmp/ge.parquet", "score", "ge", 70)
 val @ge = Arrow::read("$tmp/ge.parquet")

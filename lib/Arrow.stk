@@ -370,6 +370,16 @@ fn Arrow::null_counts ($path, %opts) {
     Arrow::_decode("null_counts", arrow__null_counts(to_json(\%req)))
 }
 
+## The (rows, columns) shape of the source as a hashref { rows, columns } — the
+## canonical DataFrame shape accessor (pandas/polars .shape).
+fn Arrow::shape ($path, %opts) {
+    val %req = (
+        src => $path,
+        format => $opts{format},
+    )
+    Arrow::_decode("shape", arrow__shape(to_json(\%req)))
+}
+
 
 # ── convenience composites ──────────────────────────────────────────
 #

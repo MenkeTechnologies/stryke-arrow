@@ -1000,6 +1000,26 @@ fn op_null_counts(args: Value) -> Result<Value> {
     Ok(json!({"src": path.display().to_string(), "rows": rows, "null_counts": map}))
 }
 
+/// The dataset's `(rows, columns)` shape — the canonical DataFrame accessor
+/// (pandas/polars `.shape`). Reads the column count from the schema and streams
+/// the reader to count rows without materializing. opts: `src` (or `path`),
+/// optional `format`. Returns `{src, rows, columns}`.
+fn op_shape(args: Value) -> Result<Value> {
+    let path = args["src"]
+        .as_str()
+        .or_else(|| args["path"].as_str())
+        .ok_or_else(|| anyhow!("missing src"))?;
+    let path = Path::new(path);
+    let fmt = Fmt::from_override_or_path(args["format"].as_str(), path)?;
+    let reader = open_reader(path, fmt, None, 8192)?;
+    let columns = reader.schema().fields().len();
+    let mut rows = 0usize;
+    for b in reader {
+        rows += b?.num_rows();
+    }
+    Ok(json!({"src": path.display().to_string(), "rows": rows, "columns": columns}))
+}
+
 fn op_concat(args: Value) -> Result<Value> {
     let dst = args["dst"].as_str().ok_or_else(|| anyhow!("missing dst"))?;
     let dst = Path::new(dst);
@@ -1236,6 +1256,11 @@ pub extern "C" fn arrow__count(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn arrow__null_counts(args: *const c_char) -> *const c_char {
     ffi_call(args, op_null_counts)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__shape(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_shape)
 }
 
 #[no_mangle]
@@ -2225,6 +2250,20 @@ mod tests {
         let src = unique_csv("count", "id\n1\n2\n3\n4\n5\n");
         let r = op_count(json!({"src": src.to_str().unwrap(), "format": "csv"})).unwrap();
         assert_eq!(r["rows"].as_i64().unwrap(), 5);
+        let _ = std::fs::remove_file(src);
+    }
+
+    #[test]
+    fn op_shape_reports_rows_and_columns() {
+        // 3 columns, 4 data rows.
+        let src = unique_csv("shape", "a,b,c\n1,2,3\n4,5,6\n7,8,9\n10,11,12\n");
+        let r = op_shape(json!({"src": src.to_str().unwrap(), "format": "csv"})).unwrap();
+        assert_eq!(r["rows"].as_i64().unwrap(), 4, "four data rows");
+        assert_eq!(r["columns"].as_i64().unwrap(), 3, "three columns");
+        // Rows agree with op_count on the same file.
+        let c = op_count(json!({"src": src.to_str().unwrap(), "format": "csv"})).unwrap();
+        assert_eq!(r["rows"], c["rows"], "shape rows match count");
+        assert!(op_shape(json!({"format": "csv"})).is_err());
         let _ = std::fs::remove_file(src);
     }
 

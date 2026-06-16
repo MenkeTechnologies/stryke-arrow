@@ -271,6 +271,9 @@ Row count read straight from the source, no JSON materialization.
 #### `Arrow::null_counts(PATH, %opts) → { null_counts => { col => n, … }, rows }`
 Per-column null count (pandas `isnull().sum()`, polars `null_count()`), accumulated from each column's native Arrow `null_count()` without materializing.
 
+#### `Arrow::shape(PATH, %opts) → { rows, columns }`
+The dataset's `(rows, columns)` shape (pandas/polars `.shape`) — column count from the schema, rows streamed without materializing.
+
 ## [0x05] FFI Layer
 
 Each `Arrow::*` wrapper builds a JSON args dict and calls a sibling
