@@ -1124,6 +1124,82 @@ fn op_gather(args: Value) -> Result<Value> {
     Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
 }
 
+/// Frequency of each distinct value in a `column` — pandas/polars `value_counts`.
+/// Writes a two-column table: the `column` (its original type, distinct values)
+/// and a `count` (`Int64`), one row per distinct value, sorted by count
+/// descending then value ascending. Nulls are counted as their own group. opts:
+/// `src` (or `path`), `dst`, formats, `column`. Returns `{dst, rows, distinct}`.
+fn op_value_counts(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let merged = concat_batches(&schema, &batches)?;
+    let col_idx = schema
+        .index_of(column)
+        .map_err(|_| anyhow!("value_counts: no column `{column}`"))?;
+    let col = merged.column(col_idx).clone();
+    let field = schema.fields()[col_idx].clone();
+    // Row-convert the single column so each value is hashable, then tally.
+    let converter = RowConverter::new(vec![SortField::new(field.data_type().clone())])?;
+    let rows = converter.convert_columns(std::slice::from_ref(&col))?;
+    let mut first_idx: Vec<u32> = Vec::new();
+    let mut counts: Vec<i64> = Vec::new();
+    let mut seen: std::collections::HashMap<arrow::row::Row<'_>, usize> =
+        std::collections::HashMap::new();
+    for i in 0..rows.num_rows() {
+        let r = rows.row(i);
+        match seen.get(&r) {
+            Some(&pos) => counts[pos] += 1,
+            None => {
+                seen.insert(r, first_idx.len());
+                first_idx.push(i as u32);
+                counts.push(1);
+            }
+        }
+    }
+    // The distinct values, taken from their first occurrence in the original column.
+    let value_col = take(&col, &arrow::array::UInt32Array::from(first_idx), None)?;
+    let count_col: ArrayRef = Arc::new(arrow::array::Int64Array::from(counts.clone()));
+    let out_schema = Arc::new(Schema::new(vec![
+        field,
+        Arc::new(Field::new("count", DataType::Int64, false)),
+    ]));
+    // Sort by count desc, then value asc, for a deterministic, useful order.
+    let order = lexsort_to_indices(
+        &[
+            SortColumn {
+                values: count_col.clone(),
+                options: Some(SortOptions {
+                    descending: true,
+                    nulls_first: false,
+                }),
+            },
+            SortColumn {
+                values: value_col.clone(),
+                options: Some(SortOptions {
+                    descending: false,
+                    nulls_first: false,
+                }),
+            },
+        ],
+        None,
+    )?;
+    let out_cols: Vec<ArrayRef> = vec![
+        take(&value_col, &order, None)?,
+        take(&count_col, &order, None)?,
+    ];
+    let out = RecordBatch::try_new(out_schema.clone(), out_cols)?;
+    let distinct = counts.len();
+    let written = write_result(&io, out_schema, &[out])?;
+    Ok(json!({
+        "dst": io.dst.display().to_string(),
+        "rows": written,
+        "distinct": distinct,
+    }))
+}
+
 fn op_slice(args: Value) -> Result<Value> {
     let io = parse_io(&args)?;
     let offset = args["offset"].as_u64().unwrap_or(0) as usize;
@@ -1529,6 +1605,11 @@ pub extern "C" fn arrow__reverse(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn arrow__gather(args: *const c_char) -> *const c_char {
     ffi_call(args, op_gather)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__value_counts(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_value_counts)
 }
 
 #[no_mangle]
@@ -2765,6 +2846,53 @@ mod tests {
             "indices": [0, 5],
         }));
         assert!(err.is_err(), "index 5 is out of range for 5 rows");
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+    }
+
+    #[test]
+    fn op_value_counts_tallies_a_column_sorted_by_frequency() {
+        // color: red×3, blue×2, green×1 → sorted by count desc, then value asc.
+        let src = unique_csv("vcounts", "color\nred\nblue\nred\ngreen\nblue\nred\n");
+        let dst = dst_csv("vcounts");
+        let r = op_value_counts(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "column": "color",
+        }))
+        .unwrap();
+        assert_eq!(r["distinct"].as_u64().unwrap(), 3, "3 distinct colors");
+        assert_eq!(r["rows"].as_u64().unwrap(), 3);
+        let rows = read_back(&dst);
+        let pairs: Vec<(String, i64)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row["color"].as_str().unwrap().to_string(),
+                    // CSV reads counts back as strings; parse them.
+                    row["count"]
+                        .as_i64()
+                        .unwrap_or_else(|| row["count"].as_str().unwrap().parse().unwrap()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("red".to_string(), 3),
+                ("blue".to_string(), 2),
+                ("green".to_string(), 1)
+            ],
+            "sorted by count desc"
+        );
+        // A missing column errors.
+        let dst2 = dst_csv("vcounts_bad");
+        assert!(op_value_counts(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst2.to_str().unwrap(), "dst_format": "csv",
+            "column": "nope",
+        }))
+        .is_err());
         let _ = std::fs::remove_file(src);
         let _ = std::fs::remove_file(dst);
     }

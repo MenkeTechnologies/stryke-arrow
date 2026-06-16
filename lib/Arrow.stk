@@ -350,6 +350,23 @@ fn Arrow::gather ($src, $dst, $indices, %opts) {
     Arrow::_decode("gather", arrow__gather(to_json(\%req)))
 }
 
+## Frequency of each distinct value in $column (pandas/polars value_counts).
+## Writes a two-column table — the $column (original type, distinct values) and a
+## `count` (Int64) — one row per distinct value, sorted by count descending then
+## value ascending. Nulls form their own group. Returns { dst, rows, distinct }.
+fn Arrow::value_counts ($src, $dst, $column, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        column => $column,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("value_counts", arrow__value_counts(to_json(\%req)))
+}
+
 ## First $n rows.
 fn Arrow::head ($src, $dst, $n, %opts) {
     val %req = (

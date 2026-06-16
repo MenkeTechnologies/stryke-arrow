@@ -89,6 +89,16 @@ assert_eq $gv->{rows}, 4, "gather: row count = index count"
 assert_eq join(",", map { $_->{id} } Arrow::read("$tmp/gathered.parquet")), "5,3,4,4", "gather: rows follow the index list (repeat allowed)"
 assert_dies fn { Arrow::gather($src, "$tmp/oob.parquet", [0, 5]) }, "gather: index 5 out of range for 5 rows dies"
 
+# ── value_counts (frequency per distinct value) ──────────────────────
+val $vcsrc = "$tmp/vc.parquet"
+Arrow::write($vcsrc, [ +{ c => "red" }, +{ c => "blue" }, +{ c => "red" }, +{ c => "green" }, +{ c => "blue" }, +{ c => "red" } ])
+val $vc = Arrow::value_counts($vcsrc, "$tmp/vc_out.parquet", "c")
+assert_eq $vc->{distinct}, 3, "value_counts: 3 distinct values"
+val @vcr = Arrow::read("$tmp/vc_out.parquet")
+assert_eq join(",", map { $_->{c} } @vcr),     "red,blue,green", "value_counts: distinct values sorted by count desc"
+assert_eq join(",", map { $_->{count} } @vcr), "3,2,1",          "value_counts: frequency of each value"
+assert_dies fn { Arrow::value_counts($vcsrc, "$tmp/vc_bad.parquet", "missing") }, "value_counts: a missing column dies"
+
 # ── select (reorder + drop) ──────────────────────────────────────────
 Arrow::select($src, "$tmp/cols.parquet", ["name", "id"])
 val @cols = Arrow::read("$tmp/cols.parquet")
