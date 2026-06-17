@@ -116,6 +116,17 @@ assert_ok exists $cols[0]->{name}, "select keeps name"
 assert_ok exists $cols[0]->{id}, "select keeps id"
 assert_ok !exists $cols[0]->{score}, "select drops score"
 
+# ── select_dtypes (project columns by Arrow type family) ─────────────
+val $sdint = Arrow::select_dtypes($src, "$tmp/sd_int.parquet", "integer")
+assert_eq join(",", @{ $sdint->{columns} }), "id,score", "select_dtypes integer keeps int columns in order"
+val $sdstr = Arrow::select_dtypes($src, "$tmp/sd_str.parquet", "string")
+assert_eq join(",", @{ $sdstr->{columns} }), "name", "select_dtypes string keeps the utf8 column"
+val $sdnum = Arrow::select_dtypes($src, "$tmp/sd_num.parquet", "numeric")
+assert_eq join(",", @{ $sdnum->{columns} }), "id,score", "select_dtypes numeric matches int columns too"
+val $sdnone = Arrow::select_dtypes($src, "$tmp/sd_none.parquet", "float")
+assert_eq scalar(@{ $sdnone->{columns} }), 0, "select_dtypes float on an int/str table yields zero columns"
+assert_dies fn { Arrow::select_dtypes($src, "$tmp/sd_bad.parquet", "complex") }, "select_dtypes errors on an unknown family"
+
 # ── drop (complement of select) ──────────────────────────────────────
 val $dr = Arrow::drop($src, "$tmp/dropped.parquet", ["score"])
 assert_eq join(",", @{ $dr->{columns} }), "id,name", "drop keeps remaining columns in order"

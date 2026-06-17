@@ -241,6 +241,9 @@ Keep rows where `COLUMN` is NOT in `\@values` — SQL `NOT IN`, the complement o
 #### `Arrow::select(SRC, DST, \@cols, %opts) → { dst, rows, columns }`
 Project and reorder to `\@cols` (output order = request order).
 
+#### `Arrow::select_dtypes(SRC, DST, FAMILY, %opts) → { dst, rows, columns }`
+The type-based analog of `select`: keep the columns whose Arrow type belongs to `FAMILY` — one of `numeric` (int/uint/float/decimal), `integer`, `float`, `temporal` (date/time/duration/interval), `string` (utf8), `boolean`. Families are grounded in Arrow's own `DataType` predicates. Columns keep their original order; a table with no matching column yields a zero-column result (an unknown family errors). `columns` lists the survivors.
+
 #### `Arrow::drop(SRC, DST, \@cols, %opts) → { dst, rows, columns }`
 Complement of `select`: remove `\@cols`, keep the rest in original order. Each named column must exist (a typo errors). `columns` lists the survivors.
 
@@ -309,8 +312,8 @@ is dlopened in-process on first `use Arrow` (via stryke's
 `pkg::commands::try_load_ffi_for` resolver hook). Its exports span four
 groups: **read** (`version`, `read`, `read_columnar`, `schema`, `stats`),
 **write** (`write`), **conversion** (`convert`), and **compute** (`filter`,
-`select`, `sort`, `slice`, `head`, `tail`, `count`, `concat`, `rename`,
-`cast`). The authoritative list is `[ffi].exports` in `stryke.toml`.
+`select`, `select_dtypes`, `sort`, `slice`, `head`, `tail`, `count`, `concat`,
+`rename`, `cast`). The authoritative list is `[ffi].exports` in `stryke.toml`.
 
 Wire shape (cdylib responses):
 

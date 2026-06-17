@@ -227,6 +227,23 @@ fn Arrow::select ($src, $dst, $cols, %opts) {
     Arrow::_decode("select", arrow__select(to_json(\%req)))
 }
 
+## Project columns by Arrow type family — the type-based analog of select.
+## $family is one of numeric|integer|float|temporal|string|boolean (grounded in
+## Arrow's own DataType predicates). Columns keep original order; no match yields
+## a zero-column result. Returns the surviving column names under `columns`.
+fn Arrow::select_dtypes ($src, $dst, $family, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        include => $family,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("select_dtypes", arrow__select_dtypes(to_json(\%req)))
+}
+
 ## Drop columns, keeping the rest in original order — complement of select.
 ## $cols is an arrayref of names to remove; each must exist. Returns the
 ## surviving column names under `columns`.

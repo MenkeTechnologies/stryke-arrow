@@ -832,6 +832,76 @@ fn op_select(args: Value) -> Result<Value> {
     Ok(json!({"dst": io.dst.display().to_string(), "rows": rows, "columns": cols}))
 }
 
+/// Project the columns whose Arrow type belongs to a `family` — the type-based
+/// analog of `select` (which picks columns by name). Families are grounded in
+/// Arrow's own `DataType` predicates: `numeric` (int/uint/float/decimal),
+/// `integer`, `float`, `temporal` (date/time/duration/interval), `string`
+/// (utf8/large-utf8), `boolean`. Columns keep their original order; a table with
+/// no matching column yields a zero-column result rather than an error. opts:
+/// `include` (or `dtype`), the family name. Returns the surviving column names.
+fn op_select_dtypes(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let family = args["include"]
+        .as_str()
+        .or_else(|| args["dtype"].as_str())
+        .ok_or_else(|| anyhow!("missing include (numeric|integer|float|temporal|string|boolean)"))?
+        .to_ascii_lowercase();
+    if !matches!(
+        family.as_str(),
+        "numeric"
+            | "number"
+            | "integer"
+            | "int"
+            | "float"
+            | "floating"
+            | "temporal"
+            | "string"
+            | "str"
+            | "utf8"
+            | "boolean"
+            | "bool"
+    ) {
+        bail!("unknown type family `{family}` (numeric|integer|float|temporal|string|boolean)");
+    }
+    let in_family = |dt: &DataType| match family.as_str() {
+        "numeric" | "number" => dt.is_numeric(),
+        "integer" | "int" => matches!(
+            dt,
+            DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::UInt8
+                | DataType::UInt16
+                | DataType::UInt32
+                | DataType::UInt64
+        ),
+        "float" | "floating" => dt.is_floating(),
+        "temporal" => dt.is_temporal(),
+        "string" | "str" | "utf8" => matches!(dt, DataType::Utf8 | DataType::LargeUtf8),
+        _ => matches!(dt, DataType::Boolean),
+    };
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let indices: Vec<usize> = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| in_family(f.data_type()))
+        .map(|(i, _)| i)
+        .collect();
+    let cols: Vec<String> = indices
+        .iter()
+        .map(|&i| schema.field(i).name().clone())
+        .collect();
+    let out_schema = Arc::new(schema.project(&indices)?);
+    let projected: Vec<RecordBatch> = batches
+        .iter()
+        .map(|b| b.project(&indices))
+        .collect::<std::result::Result<_, _>>()?;
+    let rows = write_result(&io, out_schema, &projected)?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows, "columns": cols}))
+}
+
 /// Drop named columns, keeping the rest in their original order — the complement
 /// of `select`. Every named column must exist (a typo errors rather than
 /// silently no-ops). Returns the surviving column names.
@@ -1610,6 +1680,11 @@ pub extern "C" fn arrow__filter_not_in(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn arrow__select(args: *const c_char) -> *const c_char {
     ffi_call(args, op_select)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__select_dtypes(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_select_dtypes)
 }
 
 #[no_mangle]
@@ -2584,6 +2659,60 @@ mod tests {
         assert_eq!(rows[0]["id"].as_i64().unwrap(), 1);
         let _ = std::fs::remove_file(src);
         let _ = std::fs::remove_file(dst);
+    }
+
+    #[test]
+    fn op_select_dtypes_projects_columns_by_type_family() {
+        // CSV inference: id/score -> Int64, ratio -> Float64, name -> Utf8.
+        let src = unique_csv("seldt", "id,name,score,ratio\n1,a,100,1.5\n2,b,200,2.5\n");
+        let run = |family: &str| -> Vec<String> {
+            let dst = dst_csv("seldt");
+            let r = op_select_dtypes(json!({
+                "src": src.to_str().unwrap(), "src_format": "csv",
+                "dst": dst.to_str().unwrap(), "dst_format": "csv",
+                "include": family,
+            }))
+            .unwrap();
+            let cols = r["columns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
+            let _ = std::fs::remove_file(dst);
+            cols
+        };
+        // Families are grounded in Arrow's own DataType predicates; order kept.
+        assert_eq!(
+            run("numeric"),
+            vec!["id", "score", "ratio"],
+            "numeric = int+float"
+        );
+        assert_eq!(
+            run("integer"),
+            vec!["id", "score"],
+            "integer keeps only ints"
+        );
+        assert_eq!(run("float"), vec!["ratio"], "float keeps only floats");
+        assert_eq!(run("string"), vec!["name"], "string keeps only utf8");
+        // No boolean column -> a zero-column result rather than an error.
+        assert!(
+            run("boolean").is_empty(),
+            "no boolean columns -> empty projection"
+        );
+        // An unknown family errors instead of silently selecting nothing.
+        let dst = dst_csv("seldt");
+        assert!(
+            op_select_dtypes(json!({
+                "src": src.to_str().unwrap(), "src_format": "csv",
+                "dst": dst.to_str().unwrap(), "dst_format": "csv",
+                "include": "complex",
+            }))
+            .is_err(),
+            "unknown family errors"
+        );
+        let _ = std::fs::remove_file(dst);
+        let _ = std::fs::remove_file(src);
     }
 
     #[test]
