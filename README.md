@@ -265,6 +265,9 @@ Reverse the row order (last row first), independent of any sort key — just fli
 #### `Arrow::gather(SRC, DST, \@indices, %opts) → { dst, rows }`
 Select rows by an explicit list of 0-based indices (polars `gather` / pandas `.iloc[[…]]`). Unlike `slice` (a contiguous window), the index list is arbitrary: it may repeat a row and emits rows in the order given. Out-of-range indices die.
 
+#### `Arrow::top_k(SRC, DST, COLUMN, K, %opts) → { dst, rows }`
+The `K` rows with the largest values in `COLUMN` (polars `top_k`). Pass `descending => 0` for the smallest (`bottom_k`). Nulls sort last so they never take a top slot, and `K` caps at the row count. The sort is limited to `K` indices up front, so it does less work than sort-then-`head`.
+
 #### `Arrow::value_counts(SRC, DST, COLUMN, %opts) → { dst, rows, distinct }`
 Frequency of each distinct value in `COLUMN` (pandas/polars `value_counts`). Writes a two-column table — `COLUMN` (original type, distinct values) and a `count` (Int64) — one row per distinct value, sorted by count descending then value ascending. Nulls form their own group.
 

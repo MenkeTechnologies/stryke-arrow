@@ -1,6 +1,6 @@
 [package]
 name = "stryke-arrow"
-version = "0.18.0"
+version = "0.19.0"
 description = "Apache Arrow / Parquet / IPC / Feather / CSV / JSON cdylib for stryke. Dlopened in-process via stryke's FFI bridge — replaces the v1 helper-binary fork-per-call model."
 authors = ["MenkeTechnologies"]
 license = "MIT"
@@ -30,6 +30,7 @@ exports = [
     "arrow__sort",
     "arrow__reverse",
     "arrow__gather",
+    "arrow__top_k",
     "arrow__value_counts",
     "arrow__slice",
     "arrow__head",

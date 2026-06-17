@@ -89,6 +89,16 @@ assert_eq $gv->{rows}, 4, "gather: row count = index count"
 assert_eq join(",", map { $_->{id} } Arrow::read("$tmp/gathered.parquet")), "5,3,4,4", "gather: rows follow the index list (repeat allowed)"
 assert_dies fn { Arrow::gather($src, "$tmp/oob.parquet", [0, 5]) }, "gather: index 5 out of range for 5 rows dies"
 
+# ── top_k (k rows by column value) ───────────────────────────────────
+# $src id column values are 3,1,4,2,5.
+val $tk = Arrow::top_k($src, "$tmp/top.parquet", "id", 2)
+assert_eq $tk->{rows}, 2, "top_k: keeps k rows"
+assert_eq join(",", map { $_->{id} } Arrow::read("$tmp/top.parquet")), "5,4", "top_k: 2 largest ids, largest first"
+Arrow::top_k($src, "$tmp/bottom.parquet", "id", 2, descending => 0)
+assert_eq join(",", map { $_->{id} } Arrow::read("$tmp/bottom.parquet")), "1,2", "top_k descending=>0: 2 smallest ids (bottom_k)"
+assert_eq Arrow::top_k($src, "$tmp/topall.parquet", "id", 100)->{rows}, 5, "top_k: k caps at the row count"
+assert_dies fn { Arrow::top_k($src, "$tmp/topbad.parquet", "nope", 1) }, "top_k: unknown column dies"
+
 # ── value_counts (frequency per distinct value) ──────────────────────
 val $vcsrc = "$tmp/vc.parquet"
 Arrow::write($vcsrc, [ +{ c => "red" }, +{ c => "blue" }, +{ c => "red" }, +{ c => "green" }, +{ c => "blue" }, +{ c => "red" } ])

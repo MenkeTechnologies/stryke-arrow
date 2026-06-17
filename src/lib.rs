@@ -1124,6 +1124,51 @@ fn op_gather(args: Value) -> Result<Value> {
     Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
 }
 
+/// The `k` rows with the largest (or smallest) values in a `column` — a named,
+/// single-pass top-N (polars `top_k`). `descending` defaults to true (largest
+/// first); set it false for the smallest (`bottom_k`). Nulls sort last so they
+/// never take a top slot, and `k` is capped at the row count. The sort is limited
+/// to `k` indices up front, so it does less work than sort-then-head. opts: `src`
+/// (or `path`), `dst`, formats, `column` (or `by`), `k`, `descending`. Returns
+/// `{dst, rows}`.
+fn op_top_k(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let column = args["column"]
+        .as_str()
+        .or_else(|| args["by"].as_str())
+        .ok_or_else(|| anyhow!("missing column"))?;
+    let k = args["k"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("missing k (number of rows to keep)"))? as usize;
+    let descending = match &args["descending"] {
+        Value::Null => true,
+        other => json_truthy(other),
+    };
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let merged = concat_batches(&schema, &batches)?;
+    let idx = schema
+        .index_of(column)
+        .map_err(|_| anyhow!("top_k: no column `{column}`"))?;
+    let sort_col = SortColumn {
+        values: merged.column(idx).clone(),
+        options: Some(SortOptions {
+            descending,
+            nulls_first: false,
+        }),
+    };
+    // The limit makes lexsort emit only the first k indices — top-k without a
+    // full materialized sort of every row.
+    let indices = lexsort_to_indices(&[sort_col], Some(k))?;
+    let cols: Vec<ArrayRef> = merged
+        .columns()
+        .iter()
+        .map(|c| take(c, &indices, None))
+        .collect::<std::result::Result<_, _>>()?;
+    let result = RecordBatch::try_new(schema.clone(), cols)?;
+    let rows = write_result(&io, schema, &[result])?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
+}
+
 /// Frequency of each distinct value in a `column` — pandas/polars `value_counts`.
 /// Writes a two-column table: the `column` (its original type, distinct values)
 /// and a `count` (`Int64`), one row per distinct value, sorted by count
@@ -1605,6 +1650,11 @@ pub extern "C" fn arrow__reverse(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn arrow__gather(args: *const c_char) -> *const c_char {
     ffi_call(args, op_gather)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__top_k(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_top_k)
 }
 
 #[no_mangle]
@@ -2848,6 +2898,63 @@ mod tests {
         assert!(err.is_err(), "index 5 is out of range for 5 rows");
         let _ = std::fs::remove_file(src);
         let _ = std::fs::remove_file(dst);
+    }
+
+    #[test]
+    fn op_top_k_returns_largest_or_smallest_rows_by_column() {
+        let src = unique_csv("topk", "name,score\na,10\nb,50\nc,30\nd,20\ne,40\n");
+        let scores = |dst: &std::path::Path| -> Vec<i64> {
+            read_back(dst)
+                .iter()
+                .map(|r| r["score"].as_i64().unwrap())
+                .collect()
+        };
+        // Default: the 2 largest, largest first.
+        let dst = dst_csv("topk");
+        let r = op_top_k(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "column": "score", "k": 2,
+        }))
+        .unwrap();
+        assert_eq!(r["rows"].as_u64().unwrap(), 2);
+        assert_eq!(scores(&dst), vec![50, 40], "top 2 by score, descending");
+        // descending=false → the 2 smallest, smallest first (bottom_k).
+        let dstb = dst_csv("topk_bottom");
+        op_top_k(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dstb.to_str().unwrap(), "dst_format": "csv",
+            "column": "score", "k": 2, "descending": false,
+        }))
+        .unwrap();
+        assert_eq!(scores(&dstb), vec![10, 20], "bottom 2 by score, ascending");
+        // k beyond the row count caps at the row count.
+        let dstall = dst_csv("topk_all");
+        let rall = op_top_k(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dstall.to_str().unwrap(), "dst_format": "csv",
+            "column": "score", "k": 100,
+        }))
+        .unwrap();
+        assert_eq!(rall["rows"].as_u64().unwrap(), 5, "k caps at the row count");
+        // An unknown column dies; a missing k dies.
+        let dste = dst_csv("topk_err");
+        assert!(op_top_k(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dste.to_str().unwrap(), "dst_format": "csv",
+            "column": "nope", "k": 1,
+        }))
+        .is_err());
+        assert!(op_top_k(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dste.to_str().unwrap(), "dst_format": "csv",
+            "column": "score",
+        }))
+        .is_err());
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+        let _ = std::fs::remove_file(dstb);
+        let _ = std::fs::remove_file(dstall);
     }
 
     #[test]
