@@ -137,7 +137,7 @@ DataFrame bridge:
 ```perl
 use Arrow::DataFrame
 
-my $df = Arrow::DataFrame::load("sales.parquet")
+val $df = Arrow::DataFrame::load("sales.parquet")
 # $df is a stryke DataFrame when the builtin is available; otherwise a
 # { col => [vals] } columnar hash.
 ```
