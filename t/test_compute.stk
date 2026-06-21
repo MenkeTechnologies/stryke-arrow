@@ -308,6 +308,75 @@ assert_eq $meta->{columns}, 3,         "metadata: column count"
 assert_ok $meta->{bytes} > 0,          "metadata: non-empty byte size"
 assert_ok exists $meta->{types}{id},   "metadata: types map carries each column"
 
+# ── std + var (sample vs population divisor) ─────────────────────────
+# Values 2,4,4,4,5,5,7,9 — the textbook dataset: mean 5, population var 4
+# (std 2), sample var 32/7.
+Arrow::write("$tmp/spread.parquet", [ map { +{ v => $_ } } (2,4,4,4,5,5,7,9) ])
+val $sd = Arrow::std("$tmp/spread.parquet", "v")
+assert_eq $sd->{count}, 8, "std: non-null count"
+assert_eq $sd->{mean},  5, "std: mean of the textbook set"
+# Sample variance is 32/7; assert via the reported var to avoid float drift.
+assert_ok abs($sd->{var} - (32.0/7.0)) < 1e-9, "std: sample variance uses n-1"
+val $sp_pop = Arrow::std("$tmp/spread.parquet", "v", population => 1)
+assert_eq $sp_pop->{var}, 4, "std: population variance uses n"
+assert_eq $sp_pop->{std}, 2, "std: population std is sqrt(var)"
+# A single value has no sample std (n-1 == 0) but a population std of 0.
+Arrow::write("$tmp/one.parquet", [ +{ v => 42 } ])
+assert_eq Arrow::std("$tmp/one.parquet", "v")->{std}, undef, "std: single value has no sample std"
+assert_eq Arrow::std("$tmp/one.parquet", "v", population => 1)->{std}, 0, "std: single value population std is 0"
+assert_dies fn { Arrow::std("$tmp/spread.parquet", "name") }, "std: non-numeric column dies"
+
+# ── median (odd vs even count) ───────────────────────────────────────
+# Source scores are 72,90,55,88,61 → sorted 55,61,72,88,90 → median 72.
+assert_eq Arrow::median($src, "score")->{median}, 72, "median: odd count is the middle value"
+# Even count: 1,2,3,4 → median (2+3)/2 = 2.5.
+Arrow::write("$tmp/even.parquet", [ map { +{ v => $_ } } (1,2,3,4) ])
+assert_eq Arrow::median("$tmp/even.parquet", "v")->{median}, 2.5, "median: even count averages the two middle values"
+
+# ── quantile (linear interpolation, numpy default) ───────────────────
+# 1,2,3,4,5: q=0 min, q=1 max, q=0.5 median, q=0.25 interpolates to 2.0.
+Arrow::write("$tmp/q.parquet", [ map { +{ v => $_ } } (1,2,3,4,5) ])
+assert_eq Arrow::quantile("$tmp/q.parquet", "v", 0)->{quantile},   1, "quantile: q=0 is the min"
+assert_eq Arrow::quantile("$tmp/q.parquet", "v", 1)->{quantile},   5, "quantile: q=1 is the max"
+assert_eq Arrow::quantile("$tmp/q.parquet", "v", 0.5)->{quantile}, 3, "quantile: q=0.5 is the median"
+assert_eq Arrow::quantile("$tmp/q.parquet", "v", 0.25)->{quantile}, 2, "quantile: q=0.25 interpolates to 2.0"
+assert_dies fn { Arrow::quantile("$tmp/q.parquet", "v", 1.5) }, "quantile: q outside [0,1] dies"
+
+# ── corr (Pearson) ───────────────────────────────────────────────────
+# y = 2x exactly → correlation 1; y = -x → correlation -1.
+Arrow::write("$tmp/corr.parquet", [ map { +{ x => $_, up => 2 * $_, down => -$_ } } (1,2,3,4,5) ])
+assert_ok abs(Arrow::corr("$tmp/corr.parquet", "x", "up")->{corr} - 1) < 1e-9, "corr: perfect positive is 1"
+assert_ok abs(Arrow::corr("$tmp/corr.parquet", "x", "down")->{corr} + 1) < 1e-9, "corr: perfect negative is -1"
+assert_eq Arrow::corr("$tmp/corr.parquet", "x", "up")->{count}, 5, "corr: pairwise-complete count"
+
+# ── abs (elementwise absolute value) ─────────────────────────────────
+Arrow::write("$tmp/neg.parquet", [ map { +{ v => $_ } } (-3, -1, 0, 2) ])
+Arrow::abs("$tmp/neg.parquet", "$tmp/absd.parquet", "v")
+assert_eq join(",", map { $_->{v} } Arrow::read("$tmp/absd.parquet")), "3,1,0,2", "abs: negatives flipped, others unchanged"
+
+# ── round (to N decimals) ────────────────────────────────────────────
+Arrow::write("$tmp/frac.parquet", [ map { +{ v => $_ } } (1.234, 2.567, 3.891) ])
+Arrow::round("$tmp/frac.parquet", "$tmp/r0.parquet", "v")
+assert_eq join(",", map { $_->{v} } Arrow::read("$tmp/r0.parquet")), "1,3,4", "round: default 0 decimals (half away from zero)"
+Arrow::round("$tmp/frac.parquet", "$tmp/r2.parquet", "v", decimals => 2)
+assert_eq join(",", map { $_->{v} } Arrow::read("$tmp/r2.parquet")), "1.23,2.57,3.89", "round: 2 decimals"
+
+# ── add_const (additive counterpart of scale) ────────────────────────
+Arrow::write("$tmp/addsrc.parquet", [ map { +{ v => $_ } } (1, 2, 3) ])
+Arrow::add_const("$tmp/addsrc.parquet", "$tmp/added.parquet", "v", 10)
+assert_eq join(",", map { $_->{v} } Arrow::read("$tmp/added.parquet")), "11,12,13", "add_const: constant added to each value"
+assert_dies fn { Arrow::add_const($src, "$tmp/x.parquet", "name", 1) }, "add_const: non-numeric column dies"
+
+# ── filter_str (string predicate filter) ─────────────────────────────
+# Source names: charlie, alice, dana, bob, erin (input order).
+val $fs = Arrow::filter_str($src, "$tmp/has_a.parquet", "name", "contains", "a")
+assert_eq join(",", map { $_->{name} } Arrow::read("$tmp/has_a.parquet")), "charlie,alice,dana", "filter_str: contains 'a'"
+Arrow::filter_str($src, "$tmp/starts_a.parquet", "name", "starts_with", "a")
+assert_eq join(",", map { $_->{name} } Arrow::read("$tmp/starts_a.parquet")), "alice", "filter_str: starts_with 'a'"
+Arrow::filter_str($src, "$tmp/like_e.parquet", "name", "like", "%e")
+assert_eq join(",", map { $_->{name} } Arrow::read("$tmp/like_e.parquet")), "charlie,alice", "filter_str: like '%e' matches names ending in e"
+assert_dies fn { Arrow::filter_str($src, "$tmp/x.parquet", "score", "contains", "9") }, "filter_str: non-string column dies"
+
 # ── cleanup ──────────────────────────────────────────────────────────
 for val $f (qw(src ge bob sorted cols head tail slice a b cat ren cast)) {
     unlink "$tmp/$f.parquet" if -e "$tmp/$f.parquet"

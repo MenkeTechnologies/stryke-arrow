@@ -2043,6 +2043,349 @@ fn op_aggregate(args: Value) -> Result<Value> {
     Ok(json!({"dst": io.dst.display().to_string(), "rows": rows, "agg": agg}))
 }
 
+// ── distribution stats + element-wise numeric transforms ─────────────────────
+//
+// Aggregates Arrow lacks a single kernel for (std/var/median/quantile/corr) are
+// computed over the Float64-cast values via `numeric_column` — nulls are
+// dropped, so the divisor is the non-null count. The element-wise transforms
+// (abs/round/add_const) mirror `clip`/`scale`: cast the target column to
+// Float64, apply the op, cast back so the column keeps its on-disk width.
+
+/// The non-null values of a required numeric `column`, sorted ascending — the
+/// shared input for the order-statistic ops (`median`, `quantile`). Reading the
+/// merged batch once and sorting once keeps both ops single-pass over the data.
+fn sorted_non_null_f64(
+    schema: &SchemaRef,
+    merged: &RecordBatch,
+    name: &str,
+    op: &str,
+) -> Result<Vec<f64>> {
+    let vals = numeric_column(schema, merged, name, op)?;
+    let mut out: Vec<f64> = vals.iter().flatten().collect();
+    out.sort_by(|a, b| a.total_cmp(b));
+    Ok(out)
+}
+
+/// Population (`population => 1`) or sample (default) standard deviation +
+/// variance of one numeric `column` — pandas/polars `std`/`var`. Sample uses the
+/// Bessel-corrected `n-1` divisor; population uses `n`. Nulls are excluded.
+/// opts: `src` (or `path`), `column`, `population`, optional `format`. Returns
+/// `{column, std, var, mean, count}`; all stats are null when `count` is below
+/// the divisor's floor (0 for population, 1 for sample). Read-only.
+fn op_std(args: Value) -> Result<Value> {
+    let path = args["src"]
+        .as_str()
+        .or_else(|| args["path"].as_str())
+        .ok_or_else(|| anyhow!("missing src"))?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?;
+    let population = json_truthy(&args["population"]);
+    let p = Path::new(path);
+    let fmt = Fmt::from_override_or_path(args["format"].as_str(), p)?;
+    let (schema, batches) = read_all(p, fmt, None)?;
+    let merged = concat_batches(&schema, &batches)?;
+    let vals = numeric_column(&schema, &merged, column, "std")?;
+    let count = vals.len() - vals.null_count();
+    let divisor = if population {
+        count
+    } else {
+        count.saturating_sub(1)
+    };
+    let (std, var, mean) = if divisor == 0 {
+        (Value::Null, Value::Null, Value::Null)
+    } else {
+        let mean = arrow::compute::sum(&vals).unwrap_or(0.0) / count as f64;
+        let ss: f64 = vals.iter().flatten().map(|v| (v - mean).powi(2)).sum();
+        let var = ss / divisor as f64;
+        (json!(var.sqrt()), json!(var), json!(mean))
+    };
+    Ok(json!({
+        "src": p.display().to_string(),
+        "column": column,
+        "std": std,
+        "var": var,
+        "mean": mean,
+        "count": count,
+    }))
+}
+
+/// Median (50th percentile) of one numeric `column` — pandas/polars `median`.
+/// Sorts the non-null values and averages the two middle elements for an even
+/// count. opts: `src` (or `path`), `column`, optional `format`. Returns
+/// `{column, median, count}`; `median` is null when the column has no non-null
+/// values. Read-only.
+fn op_median(args: Value) -> Result<Value> {
+    let path = args["src"]
+        .as_str()
+        .or_else(|| args["path"].as_str())
+        .ok_or_else(|| anyhow!("missing src"))?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?;
+    let p = Path::new(path);
+    let fmt = Fmt::from_override_or_path(args["format"].as_str(), p)?;
+    let (schema, batches) = read_all(p, fmt, None)?;
+    let merged = concat_batches(&schema, &batches)?;
+    let sorted = sorted_non_null_f64(&schema, &merged, column, "median")?;
+    let count = sorted.len();
+    let median = if count == 0 {
+        Value::Null
+    } else if count % 2 == 1 {
+        json!(sorted[count / 2])
+    } else {
+        json!((sorted[count / 2 - 1] + sorted[count / 2]) / 2.0)
+    };
+    Ok(json!({
+        "src": p.display().to_string(),
+        "column": column,
+        "median": median,
+        "count": count,
+    }))
+}
+
+/// The `q`-quantile of one numeric `column` (`q` ∈ [0,1]) — pandas/polars
+/// `quantile`, using the same linear-interpolation method as numpy's default.
+/// `q=0` is the min, `q=0.5` the median, `q=1` the max. Nulls are excluded.
+/// opts: `src` (or `path`), `column`, `q`, optional `format`. Returns
+/// `{column, q, quantile, count}`; `quantile` is null for an empty column.
+/// Read-only.
+fn op_quantile(args: Value) -> Result<Value> {
+    let path = args["src"]
+        .as_str()
+        .or_else(|| args["path"].as_str())
+        .ok_or_else(|| anyhow!("missing src"))?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?;
+    let q = args["q"]
+        .as_f64()
+        .ok_or_else(|| anyhow!("missing q (a number in [0, 1])"))?;
+    if !(0.0..=1.0).contains(&q) {
+        bail!("quantile: q ({q}) must be in [0, 1]");
+    }
+    let p = Path::new(path);
+    let fmt = Fmt::from_override_or_path(args["format"].as_str(), p)?;
+    let (schema, batches) = read_all(p, fmt, None)?;
+    let merged = concat_batches(&schema, &batches)?;
+    let sorted = sorted_non_null_f64(&schema, &merged, column, "quantile")?;
+    let count = sorted.len();
+    let quantile = if count == 0 {
+        Value::Null
+    } else if count == 1 {
+        json!(sorted[0])
+    } else {
+        // Linear interpolation over the sorted sample (numpy `linear` method):
+        // position = q * (n - 1), split into integer index + fractional weight.
+        let pos = q * (count - 1) as f64;
+        let lo = pos.floor() as usize;
+        let hi = pos.ceil() as usize;
+        let frac = pos - lo as f64;
+        json!(sorted[lo] + (sorted[hi] - sorted[lo]) * frac)
+    };
+    Ok(json!({
+        "src": p.display().to_string(),
+        "column": column,
+        "q": q,
+        "quantile": quantile,
+        "count": count,
+    }))
+}
+
+/// Pearson correlation coefficient between two numeric columns `x` and `y` —
+/// pandas/polars `corr`. Only rows where BOTH columns are non-null contribute
+/// (pairwise-complete). opts: `src` (or `path`), `x`, `y`, optional `format`.
+/// Returns `{x, y, corr, count}`; `corr` is null when fewer than two complete
+/// pairs exist or either column has zero variance over the pairs. Read-only.
+fn op_corr(args: Value) -> Result<Value> {
+    let path = args["src"]
+        .as_str()
+        .or_else(|| args["path"].as_str())
+        .ok_or_else(|| anyhow!("missing src"))?;
+    let xname = args["x"].as_str().ok_or_else(|| anyhow!("missing x"))?;
+    let yname = args["y"].as_str().ok_or_else(|| anyhow!("missing y"))?;
+    let p = Path::new(path);
+    let fmt = Fmt::from_override_or_path(args["format"].as_str(), p)?;
+    let (schema, batches) = read_all(p, fmt, None)?;
+    let merged = concat_batches(&schema, &batches)?;
+    let xs = numeric_column(&schema, &merged, xname, "corr")?;
+    let ys = numeric_column(&schema, &merged, yname, "corr")?;
+    // Keep only rows where both columns are present (pairwise-complete).
+    let pairs: Vec<(f64, f64)> = xs
+        .iter()
+        .zip(ys.iter())
+        .filter_map(|(a, b)| match (a, b) {
+            (Some(a), Some(b)) => Some((a, b)),
+            _ => None,
+        })
+        .collect();
+    let n = pairs.len();
+    let corr = if n < 2 {
+        Value::Null
+    } else {
+        let nf = n as f64;
+        let mx = pairs.iter().map(|(a, _)| a).sum::<f64>() / nf;
+        let my = pairs.iter().map(|(_, b)| b).sum::<f64>() / nf;
+        let mut cov = 0.0;
+        let mut vx = 0.0;
+        let mut vy = 0.0;
+        for (a, b) in &pairs {
+            let da = a - mx;
+            let db = b - my;
+            cov += da * db;
+            vx += da * da;
+            vy += db * db;
+        }
+        let denom = (vx * vy).sqrt();
+        if denom == 0.0 {
+            Value::Null
+        } else {
+            json!(cov / denom)
+        }
+    };
+    Ok(json!({
+        "src": p.display().to_string(),
+        "x": xname,
+        "y": yname,
+        "corr": corr,
+        "count": n,
+    }))
+}
+
+/// Apply `|x|` elementwise to a numeric `column` in place — the absolute-value
+/// transform (pandas/polars `abs`). The column is cast to Float64, the op is
+/// applied, then it is cast back so the column keeps its on-disk width (mirrors
+/// `clip`/`scale`). Nulls stay null. opts: `src` (or `path`), `dst`, formats,
+/// `column`. Returns `{dst, rows}`. Pure transform.
+fn op_abs(args: Value) -> Result<Value> {
+    apply_unary_numeric(args, "abs", f64::abs)
+}
+
+/// Round a numeric `column` to `decimals` places (default 0) elementwise —
+/// pandas/polars `round`. Uses half-away-from-zero rounding (Rust `f64::round`
+/// scaled by `10^decimals`). The column round-trips through Float64 and is cast
+/// back to its width. Nulls stay null. opts: `src` (or `path`), `dst`, formats,
+/// `column`, `decimals`. Returns `{dst, rows}`. Pure transform.
+fn op_round(args: Value) -> Result<Value> {
+    let decimals = args["decimals"].as_i64().unwrap_or(0);
+    let scale = 10f64.powi(decimals as i32);
+    apply_unary_numeric(args, "round", move |v| (v * scale).round() / scale)
+}
+
+/// Shared body for the elementwise numeric transforms (`abs`, `round`): resolve
+/// the required numeric `column`, cast each batch's column to Float64, apply
+/// `op`, and cast the result back to the column's original dtype so the on-disk
+/// width is preserved. Nulls are carried through by `unary` (it operates only on
+/// valid slots).
+fn apply_unary_numeric<F>(args: Value, op_name: &str, op: F) -> Result<Value>
+where
+    F: Fn(f64) -> f64,
+{
+    let io = parse_io(&args)?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let idx = schema
+        .index_of(column)
+        .map_err(|_| anyhow!("{op_name}: no column `{column}`"))?;
+    let dt = schema.field(idx).data_type().clone();
+    if !is_numeric(&dt) {
+        bail!("{op_name}: column `{column}` is not numeric");
+    }
+    let mut out = Vec::with_capacity(batches.len());
+    for b in &batches {
+        let mut cols: Vec<ArrayRef> = b.columns().to_vec();
+        let f64col = as_f64(&cols[idx])?;
+        let mapped: arrow::array::Float64Array =
+            arrow::compute::kernels::arity::unary(&f64col, &op);
+        cols[idx] = arrow::compute::cast(&(Arc::new(mapped) as ArrayRef), &dt)?;
+        out.push(RecordBatch::try_new(schema.clone(), cols)?);
+    }
+    let rows = write_result(&io, schema, &out)?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
+}
+
+/// Add a constant `value` to a numeric `column` in place — the additive
+/// counterpart of `scale` (which multiplies). Uses Arrow's numeric `add` kernel
+/// with a typed scalar, so the column keeps its width (integer columns stay
+/// integer). opts: `src` (or `path`), `dst`, formats, `column`, `value`. Returns
+/// `{dst, rows}`. Pure transform.
+fn op_add_const(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?;
+    let value = args["value"]
+        .as_f64()
+        .ok_or_else(|| anyhow!("missing value (number)"))?;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let idx = schema
+        .index_of(column)
+        .map_err(|_| anyhow!("add_const: no column `{column}`"))?;
+    let dt = schema.field(idx).data_type().clone();
+    if !is_numeric(&dt) {
+        bail!("add_const: column `{column}` is not numeric");
+    }
+    let mut out = Vec::with_capacity(batches.len());
+    for b in &batches {
+        let mut cols: Vec<ArrayRef> = b.columns().to_vec();
+        let scalar = Scalar::new(numeric_scalar_for(&dt, value)?);
+        cols[idx] = arrow::compute::kernels::numeric::add(&cols[idx], &scalar)?;
+        out.push(RecordBatch::try_new(schema.clone(), cols)?);
+    }
+    let rows = write_result(&io, schema, &out)?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
+}
+
+/// Keep rows whose string `column` matches a `value` under a text predicate `op`
+/// — the string-search filter that complements `filter` (numeric/ordered
+/// comparison only). `op` ∈ `contains`|`starts_with`|`ends_with`|`like`|`ilike`:
+/// `contains`/`starts_with`/`ends_with` test substrings; `like`/`ilike` use SQL
+/// `%`/`_` wildcards (`ilike` case-insensitive). The column must be Utf8. A null
+/// cell never matches. opts: `src` (or `path`), `dst`, formats, `column`, `op`,
+/// `value`. Returns `{dst, rows}`. Pure transform.
+fn op_filter_str(args: Value) -> Result<Value> {
+    use arrow::array::StringArray;
+    use arrow::compute::kernels::comparison::{contains, ends_with, ilike, like, starts_with};
+    let io = parse_io(&args)?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?;
+    let op = args["op"].as_str().unwrap_or("contains");
+    let value = args["value"]
+        .as_str()
+        .ok_or_else(|| anyhow!("filter_str: missing value (string)"))?;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let idx = schema
+        .index_of(column)
+        .map_err(|_| anyhow!("filter_str: no column `{column}`"))?;
+    if !matches!(
+        schema.field(idx).data_type(),
+        DataType::Utf8 | DataType::LargeUtf8
+    ) {
+        bail!("filter_str: column `{column}` is not a string column");
+    }
+    let needle = Scalar::new(StringArray::from(vec![value]));
+    let mut out = Vec::with_capacity(batches.len());
+    for b in &batches {
+        let col = b.column(idx);
+        let mask: BooleanArray = match op {
+            "contains" => contains(col, &needle)?,
+            "starts_with" | "startswith" | "prefix" => starts_with(col, &needle)?,
+            "ends_with" | "endswith" | "suffix" => ends_with(col, &needle)?,
+            "like" => like(col, &needle)?,
+            "ilike" => ilike(col, &needle)?,
+            other => bail!(
+                "filter_str: unknown op `{other}` (contains|starts_with|ends_with|like|ilike)"
+            ),
+        };
+        out.push(filter_record_batch(b, &mask)?);
+    }
+    let rows = write_result(&io, schema, &out)?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
+}
+
 // ── FFI plumbing ────────────────────────────────────────────────────────────
 
 fn ffi_call<F>(args: *const c_char, handler: F) -> *const c_char
@@ -2303,6 +2646,46 @@ pub extern "C" fn arrow__fold_case(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn arrow__metadata(args: *const c_char) -> *const c_char {
     ffi_call(args, op_metadata)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__std(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_std)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__median(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_median)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__quantile(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_quantile)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__corr(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_corr)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__abs(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_abs)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__round(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_round)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__add_const(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_add_const)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__filter_str(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_filter_str)
 }
 
 #[cfg(test)]
@@ -4209,5 +4592,201 @@ mod tests {
         // Missing src errors.
         assert!(op_metadata(json!({"format": "csv"})).is_err());
         let _ = std::fs::remove_file(src);
+    }
+
+    #[test]
+    fn op_std_sample_vs_population_divisor() {
+        // Textbook set 2,4,4,4,5,5,7,9: mean 5, population var 4 (std 2),
+        // sample var 32/7. The whole point of the op is choosing n vs n-1, so
+        // the two divisors must give different answers; a refactor that hardcoded
+        // one divisor would make one of these assertions fail.
+        let src = unique_csv("std", "v\n2\n4\n4\n4\n5\n5\n7\n9\n");
+        let path = src.to_str().unwrap();
+        let sample = op_std(json!({"src": path, "format": "csv", "column": "v"})).unwrap();
+        assert_eq!(sample["count"].as_u64().unwrap(), 8);
+        assert_eq!(sample["mean"].as_f64().unwrap(), 5.0);
+        assert!(
+            (sample["var"].as_f64().unwrap() - 32.0 / 7.0).abs() < 1e-9,
+            "sample var uses n-1: {}",
+            sample["var"]
+        );
+        let pop =
+            op_std(json!({"src": path, "format": "csv", "column": "v", "population": 1})).unwrap();
+        assert_eq!(pop["var"].as_f64().unwrap(), 4.0, "population var uses n");
+        assert_eq!(
+            pop["std"].as_f64().unwrap(),
+            2.0,
+            "population std is sqrt(var)"
+        );
+        // A single non-null value: sample std is undefined (n-1 == 0), population
+        // std is 0. Slice to one row to keep the numeric type.
+        let one = unique_path("stdone", "parquet");
+        op_slice(json!({
+            "src": path, "src_format": "csv",
+            "dst": one.to_str().unwrap(), "dst_format": "parquet",
+            "offset": 0, "length": 1,
+        }))
+        .unwrap();
+        let onep = one.to_str().unwrap();
+        assert!(
+            op_std(json!({"src": onep, "format": "parquet", "column": "v"})).unwrap()["std"]
+                .is_null(),
+            "single value has no sample std"
+        );
+        assert_eq!(
+            op_std(json!({"src": onep, "format": "parquet", "column": "v", "population": 1}))
+                .unwrap()["std"]
+                .as_f64()
+                .unwrap(),
+            0.0,
+            "single value population std is 0"
+        );
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&one);
+    }
+
+    #[test]
+    fn op_quantile_linear_interpolation_matches_numpy_default() {
+        // 1,2,3,4,5 — numpy `linear` method: q=0 min, q=1 max, q=0.5 median,
+        // q=0.25 → position 1.0 → exactly 2.0, q=0.1 → position 0.4 → 1.4
+        // (interpolated). The interpolation arithmetic (`pos = q*(n-1)`, floor +
+        // frac) is the regression-prone part; an integer-index-only quantile
+        // would give 1.0 at q=0.1.
+        let src = unique_csv("quant", "v\n1\n2\n3\n4\n5\n");
+        let path = src.to_str().unwrap();
+        let at = |q: f64| {
+            op_quantile(json!({"src": path, "format": "csv", "column": "v", "q": q})).unwrap()
+                ["quantile"]
+                .as_f64()
+                .unwrap()
+        };
+        assert_eq!(at(0.0), 1.0);
+        assert_eq!(at(1.0), 5.0);
+        assert_eq!(at(0.5), 3.0);
+        assert_eq!(at(0.25), 2.0);
+        assert!(
+            (at(0.1) - 1.4).abs() < 1e-9,
+            "interpolated q=0.1 should be 1.4"
+        );
+        // Out-of-range q is rejected.
+        assert!(
+            op_quantile(json!({"src": path, "format": "csv", "column": "v", "q": 1.5})).is_err(),
+            "q outside [0,1] errors"
+        );
+        let _ = std::fs::remove_file(src);
+    }
+
+    #[test]
+    fn op_corr_perfect_linear_relationships() {
+        // up = 2x (perfect positive → 1), down = -x (perfect negative → -1).
+        // Only pairwise-complete rows count; here all 5 are complete.
+        let src = unique_csv(
+            "corr",
+            "x,up,down\n1,2,-1\n2,4,-2\n3,6,-3\n4,8,-4\n5,10,-5\n",
+        );
+        let path = src.to_str().unwrap();
+        let pos = op_corr(json!({"src": path, "format": "csv", "x": "x", "y": "up"})).unwrap();
+        assert!(
+            (pos["corr"].as_f64().unwrap() - 1.0).abs() < 1e-9,
+            "positive corr is 1"
+        );
+        assert_eq!(pos["count"].as_u64().unwrap(), 5);
+        let neg = op_corr(json!({"src": path, "format": "csv", "x": "x", "y": "down"})).unwrap();
+        assert!(
+            (neg["corr"].as_f64().unwrap() + 1.0).abs() < 1e-9,
+            "negative corr is -1"
+        );
+        let _ = std::fs::remove_file(src);
+    }
+
+    #[test]
+    fn op_filter_str_predicates_and_type_guard() {
+        // contains/starts_with/ends_with/like over a name column; a non-string
+        // column must be rejected rather than silently matching nothing.
+        let src = unique_csv("fstr", "name\ncharlie\nalice\ndana\nbob\nerin\n");
+        let path = src.to_str().unwrap();
+        let names = |op: &str, v: &str| -> Vec<String> {
+            let dst = dst_csv("fstr");
+            op_filter_str(json!({
+                "src": path, "src_format": "csv",
+                "dst": dst.to_str().unwrap(), "dst_format": "csv",
+                "column": "name", "op": op, "value": v,
+            }))
+            .unwrap();
+            let out = read_back(&dst)
+                .iter()
+                .map(|r| r["name"].as_str().unwrap().to_string())
+                .collect();
+            let _ = std::fs::remove_file(&dst);
+            out
+        };
+        assert_eq!(names("contains", "a"), vec!["charlie", "alice", "dana"]);
+        assert_eq!(names("starts_with", "a"), vec!["alice"]);
+        assert_eq!(names("ends_with", "e"), vec!["charlie", "alice"]);
+        assert_eq!(names("like", "%e"), vec!["charlie", "alice"]);
+        // A numeric column is rejected.
+        let numsrc = unique_csv("fstrnum", "v\n1\n2\n");
+        let dst = dst_csv("fstrnum");
+        assert!(
+            op_filter_str(json!({
+                "src": numsrc.to_str().unwrap(), "src_format": "csv",
+                "dst": dst.to_str().unwrap(), "dst_format": "csv",
+                "column": "v", "op": "contains", "value": "1",
+            }))
+            .is_err(),
+            "non-string column rejected"
+        );
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&numsrc);
+    }
+
+    #[test]
+    fn op_abs_and_round_keep_dtype_and_carry_nulls() {
+        // abs flips negatives; round halves away from zero. A null cell stays
+        // null (the empty field in the two-column row).
+        let src = unique_csv("absround", "id,v\n1,-3.5\n2,2.4\n3,\n4,-1.6\n");
+        let path = src.to_str().unwrap();
+        let absd = unique_path("absd", "parquet");
+        op_abs(json!({
+            "src": path, "src_format": "csv",
+            "dst": absd.to_str().unwrap(), "dst_format": "parquet",
+            "column": "v",
+        }))
+        .unwrap();
+        let rows = op_read(json!({"path": absd.to_str().unwrap(), "format": "parquet"})).unwrap();
+        let vs: Vec<Value> = rows["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["v"].clone())
+            .collect();
+        assert_eq!(vs[0].as_f64().unwrap(), 3.5);
+        assert_eq!(vs[1].as_f64().unwrap(), 2.4);
+        assert!(vs[2].is_null(), "null carried through abs");
+        assert_eq!(vs[3].as_f64().unwrap(), 1.6);
+        let rnd = unique_path("rnd", "parquet");
+        op_round(json!({
+            "src": path, "src_format": "csv",
+            "dst": rnd.to_str().unwrap(), "dst_format": "parquet",
+            "column": "v",
+        }))
+        .unwrap();
+        let rrows = op_read(json!({"path": rnd.to_str().unwrap(), "format": "parquet"})).unwrap();
+        let rv: Vec<Value> = rrows["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["v"].clone())
+            .collect();
+        assert_eq!(
+            rv[0].as_f64().unwrap(),
+            -4.0,
+            "round(-3.5) half away from zero"
+        );
+        assert_eq!(rv[1].as_f64().unwrap(), 2.0, "round(2.4)");
+        assert!(rv[2].is_null(), "null carried through round");
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&absd);
+        let _ = std::fs::remove_file(&rnd);
     }
 }

@@ -238,6 +238,9 @@ Keep rows where `COLUMN` is in `\@values` — SQL `IN`. Each value is typed agai
 #### `Arrow::filter_not_in(SRC, DST, COLUMN, \@values, %opts) → { dst, rows }`
 Keep rows where `COLUMN` is NOT in `\@values` — SQL `NOT IN`, the complement of `filter_in`. A null is kept (matches nothing, like pandas `~isin`); an empty set keeps every row. Unknown column errors.
 
+#### `Arrow::filter_str(SRC, DST, COLUMN, OP, VALUE, %opts) → { dst, rows }`
+The string-search filter that complements `filter` (numeric/ordered comparison only). Keep rows whose string `COLUMN` matches `VALUE` under `OP` ∈ `contains|starts_with|ends_with|like|ilike`: `contains`/`starts_with`/`ends_with` test substrings; `like`/`ilike` use SQL `%`/`_` wildcards (`ilike` case-insensitive). The column must be a string column; a null cell never matches.
+
 #### `Arrow::select(SRC, DST, \@cols, %opts) → { dst, rows, columns }`
 Project and reorder to `\@cols` (output order = request order).
 
@@ -316,6 +319,18 @@ Arithmetic mean of one numeric `COLUMN`; nulls are excluded from both sum and di
 #### `Arrow::min_max(PATH, COLUMN, %opts) → { column, min, max }`
 Minimum and maximum of one numeric `COLUMN` in a single pass; both `undef` when the column is all-null.
 
+#### `Arrow::std(PATH, COLUMN, %opts) → { column, std, var, mean, count }`
+Standard deviation + variance of one numeric `COLUMN` (pandas/polars `std`/`var`). Sample by default (`n-1` divisor); pass `population => 1` for the population `n` divisor. Nulls are excluded; all stats are `undef` when `count` is below the divisor floor (0 population, 1 sample).
+
+#### `Arrow::median(PATH, COLUMN, %opts) → { column, median, count }`
+Median (50th percentile) of one numeric `COLUMN` (pandas/polars `median`); an even count averages the two middle values. Nulls are excluded; `median` is `undef` for an all-null column.
+
+#### `Arrow::quantile(PATH, COLUMN, Q, %opts) → { column, q, quantile, count }`
+The `Q`-quantile of one numeric `COLUMN` (`Q` ∈ `[0,1]`) using numpy's default linear interpolation — `q=0` min, `q=0.5` median, `q=1` max. Nulls are excluded; `quantile` is `undef` for an all-null column. `Q` outside `[0,1]` errors.
+
+#### `Arrow::corr(PATH, X, Y, %opts) → { x, y, corr, count }`
+Pearson correlation between numeric columns `X` and `Y` (pandas/polars `corr`). Only pairwise-complete rows (both non-null) contribute. `corr` is `undef` with fewer than two complete pairs or when either column has zero variance over them.
+
 #### `Arrow::describe(PATH, %opts) → { columns }`
 Per-column summary over every numeric column (pandas `DataFrame.describe`). Each entry is `{ column, count, nulls, min, max, mean, sum }`; non-numeric columns are skipped.
 
@@ -330,6 +345,15 @@ Clamp a numeric `COLUMN` into `[LOWER, UPPER]` (pandas/polars `clip`). Pass `und
 
 #### `Arrow::scale(SRC, DST, COLUMN, FACTOR, %opts) → { dst, rows }`
 Multiply a numeric `COLUMN` by the constant `FACTOR` in place (polars `col * k`). The column keeps its width (integer columns stay integer, truncating).
+
+#### `Arrow::add_const(SRC, DST, COLUMN, VALUE, %opts) → { dst, rows }`
+Add the constant `VALUE` to a numeric `COLUMN` in place — the additive counterpart of `scale`. The column keeps its width (integer columns stay integer).
+
+#### `Arrow::abs(SRC, DST, COLUMN, %opts) → { dst, rows }`
+Absolute value of a numeric `COLUMN` in place (pandas/polars `abs`). The column keeps its on-disk width; nulls stay null.
+
+#### `Arrow::round(SRC, DST, COLUMN, %opts) → { dst, rows }`
+Round a numeric `COLUMN` to `decimals` places in place (pandas/polars `round`; `decimals` default `0`, half-away-from-zero). The column keeps its width; nulls stay null.
 
 #### `Arrow::add_column(SRC, DST, NAME, VALUE, TYPE, %opts) → { dst, rows, columns }`
 Append a new column `NAME` filled with the constant `VALUE`, typed by `TYPE` ∈ `int|int32|float|float32|str|bool` (polars `with_columns(lit(...))`). The name must not already exist.

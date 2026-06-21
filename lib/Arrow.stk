@@ -721,6 +721,133 @@ fn Arrow::metadata ($path, %opts) {
     Arrow::_decode("metadata", arrow__metadata(to_json(\%req)))
 }
 
+## Standard deviation + variance of one numeric $column (pandas/polars std/var)
+## as a hashref { column, std, var, mean, count }. Sample by default (n−1
+## divisor); pass population => 1 in %opts for the population n divisor. Nulls
+## are excluded; std/var/mean are undef when count is below the divisor floor.
+## Read-only.
+fn Arrow::std ($path, $column, %opts) {
+    val %req = (
+        src => $path,
+        column => $column,
+        population => exists($opts{population}) ? $opts{population} : 0,
+        format => $opts{format},
+    )
+    Arrow::_decode("std", arrow__std(to_json(\%req)))
+}
+
+## Median (50th percentile) of one numeric $column (pandas/polars median) as a
+## hashref { column, median, count } — for an even count it averages the two
+## middle values. Nulls are excluded; median is undef for an all-null column.
+## Read-only.
+fn Arrow::median ($path, $column, %opts) {
+    val %req = (
+        src => $path,
+        column => $column,
+        format => $opts{format},
+    )
+    Arrow::_decode("median", arrow__median(to_json(\%req)))
+}
+
+## The $q-quantile of one numeric $column ($q in [0,1]) using numpy's default
+## linear interpolation (q=0 min, q=0.5 median, q=1 max) as a hashref
+## { column, q, quantile, count }. Nulls are excluded; quantile is undef for an
+## all-null column. Read-only.
+fn Arrow::quantile ($path, $column, $q, %opts) {
+    val %req = (
+        src => $path,
+        column => $column,
+        q => $q,
+        format => $opts{format},
+    )
+    Arrow::_decode("quantile", arrow__quantile(to_json(\%req)))
+}
+
+## Pearson correlation between numeric columns $x and $y (pandas/polars corr) as
+## a hashref { x, y, corr, count } — only pairwise-complete rows (both non-null)
+## contribute. corr is undef with fewer than two complete pairs or when either
+## column has zero variance over them. Read-only.
+fn Arrow::corr ($path, $x, $y, %opts) {
+    val %req = (
+        src => $path,
+        x => $x,
+        y => $y,
+        format => $opts{format},
+    )
+    Arrow::_decode("corr", arrow__corr(to_json(\%req)))
+}
+
+## Absolute value of a numeric $column in place (pandas/polars abs). The column
+## keeps its on-disk width; nulls stay null. Returns { dst, rows }.
+fn Arrow::abs ($src, $dst, $column, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        column => $column,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("abs", arrow__abs(to_json(\%req)))
+}
+
+## Round a numeric $column to $decimals places in place (pandas/polars round;
+## $decimals default 0, half-away-from-zero). The column keeps its width; nulls
+## stay null. opts: decimals, plus the usual format/compression keys. Returns
+## { dst, rows }.
+fn Arrow::round ($src, $dst, $column, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        column => $column,
+        decimals => exists($opts{decimals}) ? $opts{decimals} : 0,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("round", arrow__round(to_json(\%req)))
+}
+
+## Add the constant $value to a numeric $column in place — the additive
+## counterpart of scale (which multiplies). The column keeps its width (integer
+## columns stay integer). Returns { dst, rows }.
+fn Arrow::add_const ($src, $dst, $column, $value, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        column => $column,
+        value => $value,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("add_const", arrow__add_const(to_json(\%req)))
+}
+
+## Keep rows whose string $column matches $value under text predicate $op —
+## the string-search filter that complements filter (numeric/ordered comparison).
+## $op ∈ contains|starts_with|ends_with|like|ilike: contains/starts_with/
+## ends_with test substrings; like/ilike use SQL %/_ wildcards (ilike is
+## case-insensitive). The column must be a string column; a null cell never
+## matches. Returns { dst, rows }.
+fn Arrow::filter_str ($src, $dst, $column, $op, $value, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        column => $column,
+        op => $op,
+        value => $value,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("filter_str", arrow__filter_str(to_json(\%req)))
+}
+
 
 # ── convenience composites ──────────────────────────────────────────
 #

@@ -55,6 +55,14 @@ exports = [
     "arrow__sample",
     "arrow__fold_case",
     "arrow__metadata",
+    "arrow__std",
+    "arrow__median",
+    "arrow__quantile",
+    "arrow__corr",
+    "arrow__abs",
+    "arrow__round",
+    "arrow__add_const",
+    "arrow__filter_str",
 ]
 
 [scripts]

@@ -102,5 +102,13 @@ assert_ok exists &Arrow::add_column, "Arrow::add_column exists"
 assert_ok exists &Arrow::sample, "Arrow::sample exists"
 assert_ok exists &Arrow::fold_case, "Arrow::fold_case exists"
 assert_ok exists &Arrow::metadata, "Arrow::metadata exists"
+assert_ok exists &Arrow::std, "Arrow::std exists"
+assert_ok exists &Arrow::median, "Arrow::median exists"
+assert_ok exists &Arrow::quantile, "Arrow::quantile exists"
+assert_ok exists &Arrow::corr, "Arrow::corr exists"
+assert_ok exists &Arrow::abs, "Arrow::abs exists"
+assert_ok exists &Arrow::round, "Arrow::round exists"
+assert_ok exists &Arrow::add_const, "Arrow::add_const exists"
+assert_ok exists &Arrow::filter_str, "Arrow::filter_str exists"
 
 test_run
