@@ -88,16 +88,16 @@ subprocess fork per call).
 use Arrow
 
 # Read parquet/arrow/feather/csv/json — format detected from extension.
-my @rows = Arrow::read("sales.parquet")
+val @rows = Arrow::read("sales.parquet")
 p $rows[0]
 
 # Stream huge files without buffering.
-Arrow::read_stream("events.parquet", callback => sub ($row) {
+Arrow::read_stream("events.parquet", callback => fn ($row) {
     process($row)
 })
 
 # Cheap metadata: footer-only for parquet/ipc.
-my $sch = Arrow::schema("sales.parquet")
+val $sch = Arrow::schema("sales.parquet")
 p "fields: " . join(", ", map { "$_->{name}:$_->{type}" } @{ $sch->{fields} })
 
 p Arrow::row_count("sales.parquet")           # parquet footer, no scan
