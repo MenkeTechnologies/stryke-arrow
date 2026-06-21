@@ -89,4 +89,18 @@ assert_ok exists &Arrow::null_counts, "Arrow::null_counts exists"
 assert_ok exists &Arrow::shape, "Arrow::shape exists"
 assert_ok exists &Arrow::is_empty, "Arrow::is_empty exists"
 
+# ── Arrow.stk: aggregation + numeric transforms ───────────────
+assert_ok exists &Arrow::sum, "Arrow::sum exists"
+assert_ok exists &Arrow::mean, "Arrow::mean exists"
+assert_ok exists &Arrow::min_max, "Arrow::min_max exists"
+assert_ok exists &Arrow::describe, "Arrow::describe exists"
+assert_ok exists &Arrow::aggregate, "Arrow::aggregate exists"
+assert_ok exists &Arrow::unique, "Arrow::unique exists"
+assert_ok exists &Arrow::clip, "Arrow::clip exists"
+assert_ok exists &Arrow::scale, "Arrow::scale exists"
+assert_ok exists &Arrow::add_column, "Arrow::add_column exists"
+assert_ok exists &Arrow::sample, "Arrow::sample exists"
+assert_ok exists &Arrow::fold_case, "Arrow::fold_case exists"
+assert_ok exists &Arrow::metadata, "Arrow::metadata exists"
+
 test_run

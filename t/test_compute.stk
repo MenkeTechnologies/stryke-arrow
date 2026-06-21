@@ -231,6 +231,83 @@ val $sch = Arrow::schema("$tmp/cast.parquet")
 val ($idf) = grep { $_->{name} eq "id" } @{ $sch->{fields} }
 assert_match qr/(?i)utf8|string/, $idf->{type}, "cast id→str updates schema type"
 
+# ── sum / mean / min_max (read-only aggregates over a numeric column) ──
+# $src score column is 72,90,55,88,61 → sum 366, mean 73.2, min 55, max 90.
+val $sm = Arrow::sum($src, "score")
+assert_eq $sm->{sum},   366, "sum: total of the score column"
+assert_eq $sm->{count}, 5,   "sum: non-null count"
+val $mn = Arrow::mean($src, "score")
+assert_eq $mn->{mean},  73.2, "mean: average score"
+val $mm = Arrow::min_max($src, "score")
+assert_eq $mm->{min}, 55, "min_max: smallest score"
+assert_eq $mm->{max}, 90, "min_max: largest score"
+assert_dies fn { Arrow::sum($src, "name") }, "sum: a non-numeric column dies"
+
+# ── describe (per-numeric-column summary) ────────────────────────────
+# id and score are numeric; name (string) is skipped.
+val $desc = Arrow::describe($src)
+assert_eq scalar(@{ $desc->{columns} }), 2, "describe: only the 2 numeric columns"
+val ($scol) = grep { $_->{column} eq "score" } @{ $desc->{columns} }
+assert_eq $scol->{min},   55,   "describe: score min"
+assert_eq $scol->{max},   90,   "describe: score max"
+assert_eq $scol->{sum},   366,  "describe: score sum"
+assert_eq $scol->{count}, 5,    "describe: score count"
+
+# ── aggregate (column-wise → { column, value } table) ────────────────
+Arrow::aggregate($src, "$tmp/agg.parquet", agg => "max", columns => ["score"])
+val @agg = Arrow::read("$tmp/agg.parquet")
+assert_eq scalar(@agg),     1,       "aggregate: one row per aggregated column"
+assert_eq $agg[0]->{column}, "score", "aggregate: the column name"
+assert_eq $agg[0]->{value},  90,      "aggregate: max of score"
+assert_dies fn { Arrow::aggregate($src, "$tmp/aggbad.parquet", agg => "median") }, "aggregate: unknown agg dies"
+
+# ── unique (distinct values of one column, sorted) ───────────────────
+Arrow::write("$tmp/dupcol.parquet", [ +{ v => 3 }, +{ v => 1 }, +{ v => 3 }, +{ v => 2 }, +{ v => 1 } ])
+val $uq = Arrow::unique("$tmp/dupcol.parquet", "$tmp/uniq.parquet", "v")
+assert_eq $uq->{rows}, 3, "unique: 3 distinct values"
+assert_eq join(",", map { $_->{v} } Arrow::read("$tmp/uniq.parquet")), "1,2,3", "unique: distinct values sorted ascending"
+
+# ── clip (clamp into bounds) ─────────────────────────────────────────
+Arrow::write("$tmp/clipsrc.parquet", [ +{ v => -5 }, +{ v => 0 }, +{ v => 5 }, +{ v => 10 }, +{ v => 15 } ])
+Arrow::clip("$tmp/clipsrc.parquet", "$tmp/clipped.parquet", "v", 0, 10)
+assert_eq join(",", map { $_->{v} } Arrow::read("$tmp/clipped.parquet")), "0,0,5,10,10", "clip: values clamped to [0,10]"
+assert_dies fn { Arrow::clip("$tmp/clipsrc.parquet", "$tmp/clipx.parquet", "v") }, "clip: no bounds dies"
+
+# ── scale (multiply a column by a constant) ──────────────────────────
+Arrow::write("$tmp/scalesrc.parquet", [ +{ v => 1 }, +{ v => 2 }, +{ v => 3 } ])
+Arrow::scale("$tmp/scalesrc.parquet", "$tmp/scaled.parquet", "v", 10)
+assert_eq join(",", map { $_->{v} } Arrow::read("$tmp/scaled.parquet")), "10,20,30", "scale: each value multiplied by 10"
+
+# ── add_column (append a constant typed column) ──────────────────────
+val $ac = Arrow::add_column($src, "$tmp/withtag.parquet", "tag", "live", "str")
+assert_eq join(",", @{ $ac->{columns} }), "id,name,score,tag", "add_column: appended at the end"
+val @tagged = Arrow::read("$tmp/withtag.parquet")
+assert_ok !(grep { $_->{tag} ne "live" } @tagged), "add_column: every row carries the constant"
+assert_dies fn { Arrow::add_column($src, "$tmp/dupc.parquet", "id", 0, "int") }, "add_column: an existing name dies"
+
+# ── sample (every step-th row) ───────────────────────────────────────
+Arrow::write("$tmp/samplesrc.parquet", [ map { +{ i => $_ } } 0..7 ])
+val $sp = Arrow::sample("$tmp/samplesrc.parquet", "$tmp/sampled.parquet", 3)
+assert_eq $sp->{rows}, 3, "sample: rows 0,3,6 from a step of 3"
+assert_eq join(",", map { $_->{i} } Arrow::read("$tmp/sampled.parquet")), "0,3,6", "sample: every 3rd row"
+Arrow::sample("$tmp/samplesrc.parquet", "$tmp/sampled2.parquet", 2, offset => 1)
+assert_eq join(",", map { $_->{i} } Arrow::read("$tmp/sampled2.parquet")), "1,3,5,7", "sample: step 2 from offset 1"
+
+# ── fold_case (lower/upper-case column names) ────────────────────────
+Arrow::write("$tmp/case.parquet", [ +{ ID => 1, Name => "a" }, +{ ID => 2, Name => "b" } ])
+val $fc = Arrow::fold_case("$tmp/case.parquet", "$tmp/lower.parquet")
+assert_eq join(",", @{ $fc->{columns} }), "id,name", "fold_case: names lowercased by default"
+val $fu = Arrow::fold_case("$tmp/case.parquet", "$tmp/upper.parquet", case => "upper")
+assert_eq join(",", @{ $fu->{columns} }), "ID,NAME", "fold_case: case=>upper uppercases names"
+
+# ── metadata (file-level introspection) ──────────────────────────────
+val $meta = Arrow::metadata($src)
+assert_eq $meta->{format},  "parquet", "metadata: detected format"
+assert_eq $meta->{rows},    5,         "metadata: row count"
+assert_eq $meta->{columns}, 3,         "metadata: column count"
+assert_ok $meta->{bytes} > 0,          "metadata: non-empty byte size"
+assert_ok exists $meta->{types}{id},   "metadata: types map carries each column"
+
 # ── cleanup ──────────────────────────────────────────────────────────
 for val $f (qw(src ge bob sorted cols head tail slice a b cat ren cast)) {
     unlink "$tmp/$f.parquet" if -e "$tmp/$f.parquet"

@@ -535,6 +535,192 @@ fn Arrow::shape ($path, %opts) {
     Arrow::_decode("shape", arrow__shape(to_json(\%req)))
 }
 
+# ── aggregation + numeric transforms ────────────────────────────────
+#
+# Read-only aggregates (sum/mean/min_max/describe/metadata) return their
+# result in the payload — no $dst. The transforms (aggregate/unique/clip/
+# scale/add_column/sample/fold_case) are file→file like the compute ops above.
+
+## Sum of one numeric $column (polars/pandas sum) as a hashref
+## { column, sum, count } — count excludes nulls. Read-only.
+fn Arrow::sum ($path, $column, %opts) {
+    val %req = (
+        src => $path,
+        column => $column,
+        format => $opts{format},
+    )
+    Arrow::_decode("sum", arrow__sum(to_json(\%req)))
+}
+
+## Arithmetic mean of one numeric $column (polars/pandas mean) as a hashref
+## { column, mean, count }; nulls are excluded. mean is undef for an all-null
+## (or empty) column. Read-only.
+fn Arrow::mean ($path, $column, %opts) {
+    val %req = (
+        src => $path,
+        column => $column,
+        format => $opts{format},
+    )
+    Arrow::_decode("mean", arrow__mean(to_json(\%req)))
+}
+
+## Minimum and maximum of one numeric $column in a single pass as a hashref
+## { column, min, max }; both undef for an all-null column. Read-only.
+fn Arrow::min_max ($path, $column, %opts) {
+    val %req = (
+        src => $path,
+        column => $column,
+        format => $opts{format},
+    )
+    Arrow::_decode("min_max", arrow__min_max(to_json(\%req)))
+}
+
+## Per-column summary over every numeric column (pandas DataFrame.describe) as a
+## hashref { columns => [{ column, count, nulls, min, max, mean, sum }, …] };
+## non-numeric columns are skipped. Read-only.
+fn Arrow::describe ($path, %opts) {
+    val %req = (
+        src => $path,
+        format => $opts{format},
+    )
+    Arrow::_decode("describe", arrow__describe(to_json(\%req)))
+}
+
+## Column-wise aggregate into a two-column { column, value } table at $dst —
+## polars df.select(col.agg(...)). $agg ∈ sum|mean|min|max (default sum); pass an
+## arrayref $cols (each numeric) to limit it, else every numeric column is used.
+## opts: agg, columns, plus the usual src_format/dst_format/compression/row_group.
+## Returns { dst, rows, agg }.
+fn Arrow::aggregate ($src, $dst, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        agg => $opts{agg},
+        columns => $opts{columns},
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("aggregate", arrow__aggregate(to_json(\%req)))
+}
+
+## Distinct values of a single $column (SQL SELECT DISTINCT col / polars
+## Series.unique) — unlike distinct (whole-row), this dedupes one column and
+## writes a one-column table sorted ascending (nulls last). Returns { dst, rows }.
+fn Arrow::unique ($src, $dst, $column, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        column => $column,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("unique", arrow__unique(to_json(\%req)))
+}
+
+## Clamp a numeric $column into [$lower, $upper] (pandas/polars clip). Pass
+## undef for either bound to leave that side open; at least one is required.
+## Nulls stay null. opts: lower, upper, plus the usual format/compression keys.
+## Returns { dst, rows }.
+fn Arrow::clip ($src, $dst, $column, $lower = undef, $upper = undef, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        column => $column,
+        lower => $lower,
+        upper => $upper,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("clip", arrow__clip(to_json(\%req)))
+}
+
+## Multiply a numeric $column by the constant $factor in place (polars col * k).
+## The column keeps its width (integer columns stay integer, truncating).
+## Returns { dst, rows }.
+fn Arrow::scale ($src, $dst, $column, $factor, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        column => $column,
+        factor => $factor,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("scale", arrow__scale(to_json(\%req)))
+}
+
+## Append a new column $name filled with the constant $value, typed by $type
+## (int|int32|float|float32|str|bool) — polars with_columns(lit(...)). The name
+## must not already exist. Returns { dst, rows, columns }.
+fn Arrow::add_column ($src, $dst, $name, $value, $type, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        name => $name,
+        value => $value,
+        type => $type,
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("add_column", arrow__add_column(to_json(\%req)))
+}
+
+## Systematic sample: keep every $step-th row starting at offset (default 0) —
+## df[offset::step]. $step must be at least 1. Unlike head/slice (contiguous) or
+## gather (explicit list), this thins a table uniformly. opts: offset, plus the
+## usual format/compression keys. Returns { dst, rows }.
+fn Arrow::sample ($src, $dst, $step, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        step => $step,
+        offset => $opts{offset},
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("sample", arrow__sample(to_json(\%req)))
+}
+
+## Lower- or upper-case every column name (data untouched) — schema hygiene for
+## normalizing headers before a join. $case ∈ lower|upper (default lower); a
+## case-fold that collides two names is rejected. opts: case, plus the usual
+## format/compression keys. Returns { dst, rows, columns }.
+fn Arrow::fold_case ($src, $dst, %opts) {
+    val %req = (
+        src => $src,
+        dst => $dst,
+        case => $opts{case},
+        src_format => $opts{src_format},
+        dst_format => $opts{dst_format},
+        compression => $opts{compression},
+        row_group => $opts{row_group},
+    )
+    Arrow::_decode("fold_case", arrow__fold_case(to_json(\%req)))
+}
+
+## File-level metadata as a hashref { src, format, bytes, rows, columns, types }
+## — format, on-disk byte size, row count, and a { name => type } schema map, in
+## one call. Read-only.
+fn Arrow::metadata ($path, %opts) {
+    val %req = (
+        src => $path,
+        format => $opts{format},
+    )
+    Arrow::_decode("metadata", arrow__metadata(to_json(\%req)))
+}
+
 
 # ── convenience composites ──────────────────────────────────────────
 #

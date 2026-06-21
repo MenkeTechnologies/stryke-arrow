@@ -301,6 +301,48 @@ Per-column null count (pandas `isnull().sum()`, polars `null_count()`), accumula
 #### `Arrow::shape(PATH, %opts) → { rows, columns }`
 The dataset's `(rows, columns)` shape (pandas/polars `.shape`) — column count from the schema, rows streamed without materializing.
 
+### Aggregation + numeric transforms
+
+Read-only aggregates return their result in the payload (no `DST`); the rest are
+file → file like the compute ops above. Numeric work casts the target column to
+`Float64` so one code path covers every integer/float width.
+
+#### `Arrow::sum(PATH, COLUMN, %opts) → { column, sum, count }`
+Sum of one numeric `COLUMN` (polars/pandas `sum`); `count` excludes nulls. A non-numeric column errors.
+
+#### `Arrow::mean(PATH, COLUMN, %opts) → { column, mean, count }`
+Arithmetic mean of one numeric `COLUMN`; nulls are excluded from both sum and divisor. `mean` is `undef` for an all-null or empty column.
+
+#### `Arrow::min_max(PATH, COLUMN, %opts) → { column, min, max }`
+Minimum and maximum of one numeric `COLUMN` in a single pass; both `undef` when the column is all-null.
+
+#### `Arrow::describe(PATH, %opts) → { columns }`
+Per-column summary over every numeric column (pandas `DataFrame.describe`). Each entry is `{ column, count, nulls, min, max, mean, sum }`; non-numeric columns are skipped.
+
+#### `Arrow::aggregate(SRC, DST, %opts) → { dst, rows, agg }`
+Column-wise aggregate into a two-column `{ column, value }` table. `agg` ∈ `sum|mean|min|max` (default `sum`); pass `columns => \@cols` (each numeric) to limit it, else every numeric column is aggregated.
+
+#### `Arrow::unique(SRC, DST, COLUMN, %opts) → { dst, rows }`
+Distinct values of a single `COLUMN` (SQL `SELECT DISTINCT col` / polars `Series.unique`), written as a one-column table sorted ascending (nulls last). Unlike `distinct` (whole-row dedupe), this dedupes one column.
+
+#### `Arrow::clip(SRC, DST, COLUMN, LOWER?, UPPER?, %opts) → { dst, rows }`
+Clamp a numeric `COLUMN` into `[LOWER, UPPER]` (pandas/polars `clip`). Pass `undef` for either bound to leave that side open; at least one is required. Nulls stay null.
+
+#### `Arrow::scale(SRC, DST, COLUMN, FACTOR, %opts) → { dst, rows }`
+Multiply a numeric `COLUMN` by the constant `FACTOR` in place (polars `col * k`). The column keeps its width (integer columns stay integer, truncating).
+
+#### `Arrow::add_column(SRC, DST, NAME, VALUE, TYPE, %opts) → { dst, rows, columns }`
+Append a new column `NAME` filled with the constant `VALUE`, typed by `TYPE` ∈ `int|int32|float|float32|str|bool` (polars `with_columns(lit(...))`). The name must not already exist.
+
+#### `Arrow::sample(SRC, DST, STEP, %opts) → { dst, rows }`
+Systematic sample: keep every `STEP`-th row starting at `offset` (default `0`) — `df[offset::step]`. `STEP` must be at least 1. Unlike `head`/`slice` (contiguous) or `gather` (explicit list), this thins a table uniformly.
+
+#### `Arrow::fold_case(SRC, DST, %opts) → { dst, rows, columns }`
+Lower- or upper-case every column NAME (data untouched) — `case` ∈ `lower|upper` (default `lower`). A case-fold that collides two names is rejected.
+
+#### `Arrow::metadata(PATH, %opts) → { src, format, bytes, rows, columns, types }`
+File-level metadata in one call: detected format, on-disk byte size, row count, column count, and a `{ name => type }` schema map.
+
 ## [0x05] FFI Layer
 
 Each `Arrow::*` wrapper builds a JSON args dict and calls a sibling
@@ -310,7 +352,10 @@ is dlopened in-process on first `use Arrow` (via stryke's
 groups: **read** (`version`, `read`, `read_columnar`, `schema`, `stats`),
 **write** (`write`), **conversion** (`convert`), and **compute** (`filter`,
 `select`, `sort`, `slice`, `head`, `tail`, `count`, `concat`, `rename`,
-`cast`). The authoritative list is `[ffi].exports` in `stryke.toml`.
+`cast`, plus aggregation + numeric transforms: `sum`, `mean`, `min_max`,
+`describe`, `aggregate`, `unique`, `clip`, `scale`, `add_column`, `sample`,
+`fold_case`, `metadata`). The authoritative list is `[ffi].exports` in
+`stryke.toml`.
 
 Wire shape (cdylib responses):
 

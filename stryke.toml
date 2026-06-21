@@ -43,6 +43,18 @@ exports = [
     "arrow__hstack",
     "arrow__rename",
     "arrow__cast",
+    "arrow__sum",
+    "arrow__mean",
+    "arrow__min_max",
+    "arrow__describe",
+    "arrow__aggregate",
+    "arrow__unique",
+    "arrow__clip",
+    "arrow__scale",
+    "arrow__add_column",
+    "arrow__sample",
+    "arrow__fold_case",
+    "arrow__metadata",
 ]
 
 [scripts]

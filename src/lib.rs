@@ -539,7 +539,7 @@ fn op_convert(args: Value) -> Result<Value> {
 // Output format defaults to the destination extension (else the source
 // format); compression/row_group default as in `op_write`.
 
-use arrow::array::{ArrayRef, BooleanArray, Scalar};
+use arrow::array::{Array, ArrayRef, BooleanArray, Scalar};
 use arrow::compute::kernels::cmp;
 use arrow::compute::{
     concat_batches, filter_record_batch, lexsort_to_indices, take, SortColumn, SortOptions,
@@ -1515,6 +1515,534 @@ fn op_cast(args: Value) -> Result<Value> {
     Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
 }
 
+// ── aggregation + numeric transforms ─────────────────────────────────────────
+//
+// These ops read the source, run an Arrow aggregate/arithmetic kernel, and
+// either emit a tiny summary table (aggregate/sum/mean/min_max/describe) or
+// write a transformed copy (clip/scale/add_column/sample/unique/fold_case).
+// Numeric work casts the target column to Float64 first so a single code path
+// covers every integer/float width; the cast is loss-tolerant for the value
+// ranges arrow can represent.
+
+/// True for an Arrow numeric (integer or float) data type — the columns the
+/// aggregation/arithmetic ops can operate on. Other types (Utf8, Boolean, …)
+/// are skipped by the multi-column ops and rejected by the single-column ones.
+fn is_numeric(dt: &DataType) -> bool {
+    use DataType::*;
+    matches!(
+        dt,
+        Int8 | Int16
+            | Int32
+            | Int64
+            | UInt8
+            | UInt16
+            | UInt32
+            | UInt64
+            | Float16
+            | Float32
+            | Float64
+    )
+}
+
+/// Cast a column to `Float64` and return it as a typed array — the common
+/// entry point for every numeric aggregate. Non-castable types error.
+fn as_f64(col: &ArrayRef) -> Result<arrow::array::Float64Array> {
+    let casted = arrow::compute::cast(col, &DataType::Float64)?;
+    Ok(casted
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .ok_or_else(|| anyhow!("internal: cast to Float64 did not yield a Float64Array"))?
+        .clone())
+}
+
+/// Build a single-element Arrow scalar of numeric type `dt` from an `f64` — the
+/// right-hand side of `clip`/`scale`, where the bound/factor arrives as a JSON
+/// number that may be integral or fractional. Casting a Float64 to the column's
+/// type covers every integer/float width without `scalar_for`'s strict int/float
+/// JSON-shape requirement.
+fn numeric_scalar_for(dt: &DataType, v: f64) -> Result<ArrayRef> {
+    Ok(arrow::compute::cast(
+        &arrow::array::Float64Array::from(vec![v]),
+        dt,
+    )?)
+}
+
+/// Resolve a required numeric column by name, returning its index + the merged,
+/// Float64-cast values — shared by `op_sum`, `op_mean`, `op_min_max`.
+fn numeric_column(
+    schema: &SchemaRef,
+    merged: &RecordBatch,
+    name: &str,
+    op: &str,
+) -> Result<arrow::array::Float64Array> {
+    let idx = schema
+        .index_of(name)
+        .map_err(|_| anyhow!("{op}: no column `{name}`"))?;
+    if !is_numeric(schema.field(idx).data_type()) {
+        bail!("{op}: column `{name}` is not numeric");
+    }
+    as_f64(merged.column(idx))
+}
+
+/// Sum + count for one numeric column — polars/pandas `sum`. opts: `src` (or
+/// `path`), `column`, optional `format`. Returns `{column, sum, count}` where
+/// `count` excludes nulls. Read-only — no `dst`.
+fn op_sum(args: Value) -> Result<Value> {
+    let path = args["src"]
+        .as_str()
+        .or_else(|| args["path"].as_str())
+        .ok_or_else(|| anyhow!("missing src"))?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?;
+    let p = Path::new(path);
+    let fmt = Fmt::from_override_or_path(args["format"].as_str(), p)?;
+    let (schema, batches) = read_all(p, fmt, None)?;
+    let merged = concat_batches(&schema, &batches)?;
+    let vals = numeric_column(&schema, &merged, column, "sum")?;
+    let total = arrow::compute::sum(&vals).unwrap_or(0.0);
+    let count = vals.len() - vals.null_count();
+    Ok(json!({"src": p.display().to_string(), "column": column, "sum": total, "count": count}))
+}
+
+/// Arithmetic mean of one numeric column — polars/pandas `mean`. Nulls are
+/// excluded from both the sum and the divisor. opts: `src` (or `path`),
+/// `column`, optional `format`. Returns `{column, mean, count}`; `mean` is null
+/// when the column has no non-null values. Read-only.
+fn op_mean(args: Value) -> Result<Value> {
+    let path = args["src"]
+        .as_str()
+        .or_else(|| args["path"].as_str())
+        .ok_or_else(|| anyhow!("missing src"))?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?;
+    let p = Path::new(path);
+    let fmt = Fmt::from_override_or_path(args["format"].as_str(), p)?;
+    let (schema, batches) = read_all(p, fmt, None)?;
+    let merged = concat_batches(&schema, &batches)?;
+    let vals = numeric_column(&schema, &merged, column, "mean")?;
+    let count = vals.len() - vals.null_count();
+    let mean = if count == 0 {
+        Value::Null
+    } else {
+        json!(arrow::compute::sum(&vals).unwrap_or(0.0) / count as f64)
+    };
+    Ok(json!({"src": p.display().to_string(), "column": column, "mean": mean, "count": count}))
+}
+
+/// Minimum and maximum of one numeric column in a single pass — pandas
+/// `agg(["min","max"])`. opts: `src` (or `path`), `column`, optional `format`.
+/// Returns `{column, min, max}`; both are null when the column is all-null.
+/// Read-only.
+fn op_min_max(args: Value) -> Result<Value> {
+    let path = args["src"]
+        .as_str()
+        .or_else(|| args["path"].as_str())
+        .ok_or_else(|| anyhow!("missing src"))?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?;
+    let p = Path::new(path);
+    let fmt = Fmt::from_override_or_path(args["format"].as_str(), p)?;
+    let (schema, batches) = read_all(p, fmt, None)?;
+    let merged = concat_batches(&schema, &batches)?;
+    let vals = numeric_column(&schema, &merged, column, "min_max")?;
+    let min = arrow::compute::min(&vals)
+        .map(|v| json!(v))
+        .unwrap_or(Value::Null);
+    let max = arrow::compute::max(&vals)
+        .map(|v| json!(v))
+        .unwrap_or(Value::Null);
+    Ok(json!({"src": p.display().to_string(), "column": column, "min": min, "max": max}))
+}
+
+/// Per-column summary over every numeric column — pandas `DataFrame.describe()`.
+/// For each numeric column emits `{column, count, nulls, min, max, mean, sum}`;
+/// non-numeric columns are skipped. opts: `src` (or `path`), optional `format`.
+/// Returns `{columns: [...]}`. Read-only.
+fn op_describe(args: Value) -> Result<Value> {
+    let path = args["src"]
+        .as_str()
+        .or_else(|| args["path"].as_str())
+        .ok_or_else(|| anyhow!("missing src"))?;
+    let p = Path::new(path);
+    let fmt = Fmt::from_override_or_path(args["format"].as_str(), p)?;
+    let (schema, batches) = read_all(p, fmt, None)?;
+    let merged = concat_batches(&schema, &batches)?;
+    let mut out = Vec::new();
+    for (i, f) in schema.fields().iter().enumerate() {
+        if !is_numeric(f.data_type()) {
+            continue;
+        }
+        let vals = as_f64(merged.column(i))?;
+        let nulls = vals.null_count();
+        let count = vals.len() - nulls;
+        let sum = arrow::compute::sum(&vals).unwrap_or(0.0);
+        let mean = if count == 0 {
+            Value::Null
+        } else {
+            json!(sum / count as f64)
+        };
+        out.push(json!({
+            "column": f.name(),
+            "count": count,
+            "nulls": nulls,
+            "min": arrow::compute::min(&vals).map(|v| json!(v)).unwrap_or(Value::Null),
+            "max": arrow::compute::max(&vals).map(|v| json!(v)).unwrap_or(Value::Null),
+            "mean": mean,
+            "sum": sum,
+        }));
+    }
+    Ok(json!({"src": p.display().to_string(), "columns": out}))
+}
+
+/// Distinct values of a single `column` (not whole rows like `distinct`) — SQL
+/// `SELECT DISTINCT col`, polars `Series.unique`. Writes a one-column table of
+/// the distinct values sorted ascending (nulls last); a null is one group. opts:
+/// `src` (or `path`), `dst`, formats, `column`. Returns `{dst, rows}`.
+fn op_unique(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let merged = concat_batches(&schema, &batches)?;
+    let idx = schema
+        .index_of(column)
+        .map_err(|_| anyhow!("unique: no column `{column}`"))?;
+    let col = merged.column(idx).clone();
+    let field = schema.fields()[idx].clone();
+    let converter = RowConverter::new(vec![SortField::new(field.data_type().clone())])?;
+    let rows = converter.convert_columns(std::slice::from_ref(&col))?;
+    let mut seen = std::collections::HashSet::new();
+    let first_idx: Vec<u32> = (0..rows.num_rows())
+        .filter(|&i| seen.insert(rows.row(i)))
+        .map(|i| i as u32)
+        .collect();
+    let distinct_col = take(&col, &arrow::array::UInt32Array::from(first_idx), None)?;
+    // Sort the distinct values ascending (nulls last) for a stable output.
+    let order = lexsort_to_indices(
+        &[SortColumn {
+            values: distinct_col.clone(),
+            options: Some(SortOptions {
+                descending: false,
+                nulls_first: false,
+            }),
+        }],
+        None,
+    )?;
+    let sorted = take(&distinct_col, &order, None)?;
+    let out_schema = Arc::new(Schema::new(vec![field]));
+    let out = RecordBatch::try_new(out_schema.clone(), vec![sorted])?;
+    let written = write_result(&io, out_schema, &[out])?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": written}))
+}
+
+/// Clamp a numeric `column` into `[lower, upper]` — pandas/polars `clip`. Values
+/// below `lower` become `lower`, above `upper` become `upper`; nulls stay null.
+/// At least one of `lower`/`upper` must be given (a one-sided clip leaves the
+/// other bound open). opts: `src` (or `path`), `dst`, formats, `column`,
+/// `lower`, `upper`. Returns `{dst, rows}`. Pure transform.
+fn op_clip(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?;
+    let lower = args["lower"].as_f64();
+    let upper = args["upper"].as_f64();
+    if lower.is_none() && upper.is_none() {
+        bail!("clip: at least one of lower/upper required");
+    }
+    if let (Some(lo), Some(hi)) = (lower, upper) {
+        if lo > hi {
+            bail!("clip: lower ({lo}) must be <= upper ({hi})");
+        }
+    }
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let idx = schema
+        .index_of(column)
+        .map_err(|_| anyhow!("clip: no column `{column}`"))?;
+    let dt = schema.field(idx).data_type().clone();
+    if !is_numeric(&dt) {
+        bail!("clip: column `{column}` is not numeric");
+    }
+    let mut out = Vec::with_capacity(batches.len());
+    for b in &batches {
+        let mut cols: Vec<ArrayRef> = b.columns().to_vec();
+        let mut work = cols[idx].clone();
+        if let Some(lo) = lower {
+            // where value < lower, replace with lower.
+            let lo_scalar = Scalar::new(numeric_scalar_for(&dt, lo)?);
+            let below = cmp::lt(&work, &lo_scalar)?;
+            work = arrow::compute::kernels::zip::zip(&below, &lo_scalar, &work)?;
+        }
+        if let Some(hi) = upper {
+            let hi_scalar = Scalar::new(numeric_scalar_for(&dt, hi)?);
+            let above = cmp::gt(&work, &hi_scalar)?;
+            work = arrow::compute::kernels::zip::zip(&above, &hi_scalar, &work)?;
+        }
+        cols[idx] = work;
+        out.push(RecordBatch::try_new(schema.clone(), cols)?);
+    }
+    let rows = write_result(&io, schema, &out)?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
+}
+
+/// Multiply a numeric `column` by a constant `factor` in place — the scalar-
+/// arithmetic transform (polars `col * k`). Uses Arrow's numeric `mul` kernel,
+/// so the column keeps its width (integer columns stay integer, truncating).
+/// opts: `src` (or `path`), `dst`, formats, `column`, `factor`. Returns
+/// `{dst, rows}`. Pure transform.
+fn op_scale(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?;
+    let factor = args["factor"]
+        .as_f64()
+        .ok_or_else(|| anyhow!("missing factor (number)"))?;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let idx = schema
+        .index_of(column)
+        .map_err(|_| anyhow!("scale: no column `{column}`"))?;
+    let dt = schema.field(idx).data_type().clone();
+    if !is_numeric(&dt) {
+        bail!("scale: column `{column}` is not numeric");
+    }
+    let mut out = Vec::with_capacity(batches.len());
+    for b in &batches {
+        let mut cols: Vec<ArrayRef> = b.columns().to_vec();
+        // Build a typed scalar matching the column so `mul` keeps the dtype.
+        let scalar = Scalar::new(numeric_scalar_for(&dt, factor)?);
+        cols[idx] = arrow::compute::kernels::numeric::mul(&cols[idx], &scalar)?;
+        out.push(RecordBatch::try_new(schema.clone(), cols)?);
+    }
+    let rows = write_result(&io, schema, &out)?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
+}
+
+/// Append a new column `name` filled with a constant `value`, typed by `type`
+/// (int|int32|float|float32|str|bool) — polars `with_columns(lit(...))`. The
+/// name must not already exist. opts: `src` (or `path`), `dst`, formats, `name`,
+/// `value`, `type`. Returns `{dst, rows, columns}`. Pure transform.
+fn op_add_column(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let name = args["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing name (new column name)"))?;
+    let ty = args["type"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing type (int|int32|float|float32|str|bool)"))?;
+    let dt = parse_dtype(ty)?;
+    let value = &args["value"];
+    if value.is_null() {
+        bail!("add_column: missing value");
+    }
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    if schema.index_of(name).is_ok() {
+        bail!("add_column: column `{name}` already exists");
+    }
+    let mut fields: Vec<Arc<Field>> = schema.fields().iter().cloned().collect();
+    fields.push(Arc::new(Field::new(name, dt.clone(), false)));
+    let new_schema = Arc::new(Schema::new(fields));
+    // A single-element scalar broadcast to each batch's row count via `take`.
+    let scalar = scalar_for(&dt, value)?;
+    let mut out = Vec::with_capacity(batches.len());
+    for b in &batches {
+        let n = b.num_rows();
+        let idx = arrow::array::UInt32Array::from(vec![0u32; n]);
+        let filled = take(&scalar, &idx, None)?;
+        let mut cols: Vec<ArrayRef> = b.columns().to_vec();
+        cols.push(filled);
+        out.push(RecordBatch::try_new(new_schema.clone(), cols)?);
+    }
+    let kept: Vec<String> = new_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    let rows = write_result(&io, new_schema, &out)?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows, "columns": kept}))
+}
+
+/// Keep every `step`-th row starting at `offset` — a deterministic systematic
+/// sample (`df[offset::step]`). Distinct from `head`/`slice` (contiguous) and
+/// `gather` (explicit list): it thins a large table uniformly. `step` must be
+/// at least 1. opts: `src` (or `path`), `dst`, formats, `step`, `offset`
+/// (default 0). Returns `{dst, rows}`. Pure transform.
+fn op_sample(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let step = args["step"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("missing step (>= 1)"))? as usize;
+    if step == 0 {
+        bail!("sample: step must be >= 1");
+    }
+    let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let merged = concat_batches(&schema, &batches)?;
+    let n = merged.num_rows();
+    let take_idx: Vec<u32> = (offset..n).step_by(step).map(|i| i as u32).collect();
+    let idx = arrow::array::UInt32Array::from(take_idx);
+    let cols: Vec<ArrayRef> = merged
+        .columns()
+        .iter()
+        .map(|c| take(c, &idx, None))
+        .collect::<std::result::Result<_, _>>()?;
+    let sampled = RecordBatch::try_new(schema.clone(), cols)?;
+    let rows = write_result(&io, schema, &[sampled])?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows}))
+}
+
+/// Lower- or upper-case every column NAME (data untouched) — the schema-hygiene
+/// transform for normalizing headers before a join. `case` ∈ `lower`|`upper`
+/// (default `lower`). A case-fold that collides two names (e.g. `ID` and `id`)
+/// is rejected. opts: `src` (or `path`), `dst`, formats, `case`. Returns
+/// `{dst, rows, columns}`. Pure transform.
+fn op_fold_case(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let case = args["case"].as_str().unwrap_or("lower");
+    let fold: fn(&str) -> String = match case {
+        "lower" => |s: &str| s.to_ascii_lowercase(),
+        "upper" => |s: &str| s.to_ascii_uppercase(),
+        other => bail!("fold_case: unknown case `{other}` (lower|upper)"),
+    };
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut fields: Vec<Arc<Field>> = Vec::with_capacity(schema.fields().len());
+    for f in schema.fields() {
+        let new = fold(f.name());
+        if !seen.insert(new.clone()) {
+            bail!("fold_case: case-fold collides on `{new}`");
+        }
+        fields.push(Arc::new(f.as_ref().clone().with_name(new)));
+    }
+    let new_schema = Arc::new(Schema::new(fields));
+    let renamed: Vec<RecordBatch> = batches
+        .iter()
+        .map(|b| RecordBatch::try_new(new_schema.clone(), b.columns().to_vec()))
+        .collect::<std::result::Result<_, _>>()?;
+    let kept: Vec<String> = new_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    let rows = write_result(&io, new_schema, &renamed)?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows, "columns": kept}))
+}
+
+/// File-level metadata in one call — format, on-disk byte size, row count, and
+/// a `{name: type}` map of the schema. The introspection accessor for "what is
+/// this file" without reading any data row-by-row beyond what counting needs.
+/// opts: `src` (or `path`), optional `format`. Returns
+/// `{src, format, bytes, rows, columns, types}`. Read-only.
+fn op_metadata(args: Value) -> Result<Value> {
+    let path = args["src"]
+        .as_str()
+        .or_else(|| args["path"].as_str())
+        .ok_or_else(|| anyhow!("missing src"))?;
+    let p = Path::new(path);
+    let fmt = Fmt::from_override_or_path(args["format"].as_str(), p)?;
+    let bytes = std::fs::metadata(p)
+        .with_context(|| format!("stat `{}`", p.display()))?
+        .len();
+    let reader = open_reader(p, fmt, None, 8192)?;
+    let schema = reader.schema();
+    let types: Map<String, Value> = schema
+        .fields()
+        .iter()
+        .map(|f| (f.name().clone(), json!(format!("{:?}", f.data_type()))))
+        .collect();
+    let columns = schema.fields().len();
+    let mut rows = 0usize;
+    for b in reader {
+        rows += b?.num_rows();
+    }
+    let fmt_name = match fmt {
+        Fmt::Parquet => "parquet",
+        Fmt::Ipc => "ipc",
+        Fmt::Feather => "feather",
+        Fmt::Csv => "csv",
+        Fmt::Json => "json",
+    };
+    Ok(json!({
+        "src": p.display().to_string(),
+        "format": fmt_name,
+        "bytes": bytes,
+        "rows": rows,
+        "columns": columns,
+        "types": types,
+    }))
+}
+
+/// Column-wise aggregate over selected (or all numeric) columns into a single
+/// summary — polars `df.select(col.agg(...))`. `agg` ∈ `sum`|`mean`|`min`|`max`
+/// (default `sum`). Writes a two-column table `{column, value}`, one row per
+/// aggregated column. Non-numeric columns are skipped; an explicit non-numeric
+/// `columns` entry errors. opts: `src` (or `path`), `dst`, formats, `agg`,
+/// optional `columns`. Returns `{dst, rows, agg}`.
+fn op_aggregate(args: Value) -> Result<Value> {
+    let io = parse_io(&args)?;
+    let agg = args["agg"].as_str().unwrap_or("sum").to_string();
+    if !matches!(agg.as_str(), "sum" | "mean" | "min" | "max") {
+        bail!("aggregate: unknown agg `{agg}` (sum|mean|min|max)");
+    }
+    let (schema, batches) = read_all(&io.src, io.src_fmt, None)?;
+    let merged = concat_batches(&schema, &batches)?;
+    // Target columns: explicit list (each must be numeric) or every numeric one.
+    let targets: Vec<(usize, String)> = match parse_columns(&args["columns"]) {
+        Some(names) if !names.is_empty() => names
+            .iter()
+            .map(|n| {
+                let idx = schema
+                    .index_of(n)
+                    .map_err(|_| anyhow!("aggregate: no column `{n}`"))?;
+                if !is_numeric(schema.field(idx).data_type()) {
+                    bail!("aggregate: column `{n}` is not numeric");
+                }
+                Ok((idx, n.clone()))
+            })
+            .collect::<Result<_>>()?,
+        _ => schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| is_numeric(f.data_type()))
+            .map(|(i, f)| (i, f.name().clone()))
+            .collect(),
+    };
+    let mut names = Vec::with_capacity(targets.len());
+    let mut values = Vec::with_capacity(targets.len());
+    for (idx, name) in &targets {
+        let vals = as_f64(merged.column(*idx))?;
+        let count = vals.len() - vals.null_count();
+        let v = match agg.as_str() {
+            "sum" => Some(arrow::compute::sum(&vals).unwrap_or(0.0)),
+            "mean" => {
+                if count == 0 {
+                    None
+                } else {
+                    Some(arrow::compute::sum(&vals).unwrap_or(0.0) / count as f64)
+                }
+            }
+            "min" => arrow::compute::min(&vals),
+            _ => arrow::compute::max(&vals),
+        };
+        names.push(name.clone());
+        values.push(v);
+    }
+    let name_col: ArrayRef = Arc::new(arrow::array::StringArray::from(names));
+    let value_col: ArrayRef = Arc::new(arrow::array::Float64Array::from(values));
+    let out_schema = Arc::new(Schema::new(vec![
+        Arc::new(Field::new("column", DataType::Utf8, false)),
+        Arc::new(Field::new("value", DataType::Float64, true)),
+    ]));
+    let out = RecordBatch::try_new(out_schema.clone(), vec![name_col, value_col])?;
+    let rows = write_result(&io, out_schema, &[out])?;
+    Ok(json!({"dst": io.dst.display().to_string(), "rows": rows, "agg": agg}))
+}
+
 // ── FFI plumbing ────────────────────────────────────────────────────────────
 
 fn ffi_call<F>(args: *const c_char, handler: F) -> *const c_char
@@ -1715,6 +2243,66 @@ pub extern "C" fn arrow__rename(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn arrow__cast(args: *const c_char) -> *const c_char {
     ffi_call(args, op_cast)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__sum(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_sum)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__mean(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_mean)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__min_max(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_min_max)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__describe(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_describe)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__aggregate(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_aggregate)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__unique(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_unique)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__clip(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_clip)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__scale(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_scale)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__add_column(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_add_column)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__sample(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_sample)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__fold_case(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_fold_case)
+}
+
+#[no_mangle]
+pub extern "C" fn arrow__metadata(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_metadata)
 }
 
 #[cfg(test)]
@@ -3255,5 +3843,371 @@ mod tests {
         );
         let _ = std::fs::remove_file(src);
         let _ = std::fs::remove_file(dst);
+    }
+
+    // ── aggregation + numeric transforms ─────────────────────────────────────
+    // The read-only aggregates (sum/mean/min_max/describe) return their result
+    // in the payload — no dst. The transforms (clip/scale/add_column/sample/
+    // unique/fold_case/aggregate) are file→file and are read back via read_back.
+
+    #[test]
+    fn op_sum_totals_a_numeric_column_excluding_nulls() {
+        // 10+20+30 = 60 over 3 non-null rows; the null row is excluded from the
+        // count. A regression that counted nulls in `count` or coerced the
+        // column to string before summing fails here. The null is an empty cell
+        // in a two-column row (a blank line would be an empty record, not a
+        // one-field null).
+        let src = unique_csv("sum", "id,v\n1,10\n2,20\n3,\n4,30\n");
+        let r =
+            op_sum(json!({"src": src.to_str().unwrap(), "format": "csv", "column": "v"})).unwrap();
+        assert_eq!(r["sum"].as_f64().unwrap(), 60.0, "sum of v");
+        assert_eq!(r["count"].as_u64().unwrap(), 3, "count excludes the null");
+        // A non-numeric column is rejected, not silently zero.
+        assert!(
+            op_sum(json!({"src": src.to_str().unwrap(), "format": "csv", "column": "id"})).is_ok(),
+            "id is numeric"
+        );
+        let bad = unique_csv("sumbad", "name\nalice\nbob\n");
+        assert!(
+            op_sum(json!({"src": bad.to_str().unwrap(), "format": "csv", "column": "name"}))
+                .is_err(),
+            "string column rejected"
+        );
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(bad);
+    }
+
+    #[test]
+    fn op_mean_divides_by_non_null_count_only() {
+        // (10+20+30)/3 = 20 — the null must not become a 0 in the divisor or the
+        // numerator (which would give 60/4 = 15). Null is an empty cell in a
+        // two-column row.
+        let src = unique_csv("mean", "id,v\n1,10\n2,20\n3,\n4,30\n");
+        let r =
+            op_mean(json!({"src": src.to_str().unwrap(), "format": "csv", "column": "v"})).unwrap();
+        assert_eq!(r["mean"].as_f64().unwrap(), 20.0, "mean of non-null values");
+        assert_eq!(r["count"].as_u64().unwrap(), 3);
+        // Zero non-null rows yields a null mean, not a divide-by-zero panic. We
+        // produce a numeric column with no rows by slicing the source to an
+        // empty window (the schema — and the column's numeric type — survives).
+        let empty = unique_path("meanempty", "parquet");
+        op_slice(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": empty.to_str().unwrap(), "dst_format": "parquet",
+            "offset": 0, "length": 0,
+        }))
+        .unwrap();
+        let rn =
+            op_mean(json!({"src": empty.to_str().unwrap(), "format": "parquet", "column": "v"}))
+                .unwrap();
+        assert!(rn["mean"].is_null(), "empty-column mean is null");
+        assert_eq!(rn["count"].as_u64().unwrap(), 0);
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(empty);
+    }
+
+    #[test]
+    fn op_min_max_reports_both_extremes_in_one_pass() {
+        let src = unique_csv("minmax", "v\n5\n-3\n12\n0\n");
+        let r = op_min_max(json!({"src": src.to_str().unwrap(), "format": "csv", "column": "v"}))
+            .unwrap();
+        assert_eq!(r["min"].as_f64().unwrap(), -3.0);
+        assert_eq!(r["max"].as_f64().unwrap(), 12.0);
+        let _ = std::fs::remove_file(src);
+    }
+
+    #[test]
+    fn op_describe_summarizes_numeric_columns_and_skips_others() {
+        // id (numeric) + name (string). Only id should appear in the summary.
+        let src = unique_csv("describe", "id,name\n1,a\n2,b\n3,c\n");
+        let r = op_describe(json!({"src": src.to_str().unwrap(), "format": "csv"})).unwrap();
+        let cols = r["columns"].as_array().unwrap();
+        assert_eq!(cols.len(), 1, "only the numeric column is described");
+        let s = &cols[0];
+        assert_eq!(s["column"].as_str().unwrap(), "id");
+        assert_eq!(s["count"].as_u64().unwrap(), 3);
+        assert_eq!(s["nulls"].as_u64().unwrap(), 0);
+        assert_eq!(s["min"].as_f64().unwrap(), 1.0);
+        assert_eq!(s["max"].as_f64().unwrap(), 3.0);
+        assert_eq!(s["mean"].as_f64().unwrap(), 2.0);
+        assert_eq!(s["sum"].as_f64().unwrap(), 6.0);
+        let _ = std::fs::remove_file(src);
+    }
+
+    #[test]
+    fn op_aggregate_emits_one_row_per_numeric_column() {
+        // Default agg=sum over all numeric columns (a,b); string c is skipped.
+        let src = unique_csv("agg", "a,b,c\n1,10,x\n2,20,y\n3,30,z\n");
+        let dst = dst_csv("agg");
+        let r = op_aggregate(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+        }))
+        .unwrap();
+        assert_eq!(r["rows"].as_u64().unwrap(), 2, "a and b, not c");
+        assert_eq!(r["agg"].as_str().unwrap(), "sum");
+        let rows = read_back(&dst);
+        let pairs: Vec<(String, f64)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row["column"].as_str().unwrap().to_string(),
+                    row["value"]
+                        .as_f64()
+                        .unwrap_or_else(|| row["value"].as_str().unwrap().parse().unwrap()),
+                )
+            })
+            .collect();
+        assert_eq!(pairs, vec![("a".into(), 6.0), ("b".into(), 60.0)]);
+        // agg=max with an explicit column list.
+        let dstm = dst_csv("aggmax");
+        op_aggregate(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dstm.to_str().unwrap(), "dst_format": "csv",
+            "agg": "max", "columns": ["b"],
+        }))
+        .unwrap();
+        let rm = read_back(&dstm);
+        assert_eq!(rm.len(), 1);
+        let v = rm[0]["value"]
+            .as_f64()
+            .unwrap_or_else(|| rm[0]["value"].as_str().unwrap().parse().unwrap());
+        assert_eq!(v, 30.0, "max of b");
+        // An unknown agg, a non-numeric explicit column, and an unknown column
+        // all error.
+        assert!(op_aggregate(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv", "agg": "median",
+        }))
+        .is_err());
+        assert!(op_aggregate(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv", "columns": ["c"],
+        }))
+        .is_err());
+        for p in [&src, &dst, &dstm] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn op_unique_returns_sorted_distinct_values_of_one_column() {
+        // value column has duplicates; unique keeps each once, sorted ascending.
+        let src = unique_csv("unique", "v\n3\n1\n3\n2\n1\n2\n");
+        let dst = dst_csv("unique");
+        let r = op_unique(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "column": "v",
+        }))
+        .unwrap();
+        assert_eq!(r["rows"].as_u64().unwrap(), 3, "3 distinct values");
+        let vs: Vec<i64> = read_back(&dst)
+            .iter()
+            .map(|x| x["v"].as_i64().unwrap())
+            .collect();
+        assert_eq!(vs, vec![1, 2, 3], "distinct values sorted ascending");
+        // Unknown column errors.
+        assert!(op_unique(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv", "column": "nope",
+        }))
+        .is_err());
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+    }
+
+    #[test]
+    fn op_clip_clamps_into_the_inclusive_bounds() {
+        let src = unique_csv("clip", "v\n-5\n0\n5\n10\n15\n");
+        let dst = dst_csv("clip");
+        op_clip(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "column": "v", "lower": 0, "upper": 10,
+        }))
+        .unwrap();
+        let vs: Vec<i64> = read_back(&dst)
+            .iter()
+            .map(|x| x["v"].as_i64().unwrap())
+            .collect();
+        assert_eq!(vs, vec![0, 0, 5, 10, 10], "values clamped to [0,10]");
+        // A one-sided clip (upper only) leaves the lower side open.
+        let dstu = dst_csv("clipupper");
+        op_clip(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dstu.to_str().unwrap(), "dst_format": "csv",
+            "column": "v", "upper": 5,
+        }))
+        .unwrap();
+        let vu: Vec<i64> = read_back(&dstu)
+            .iter()
+            .map(|x| x["v"].as_i64().unwrap())
+            .collect();
+        assert_eq!(vu, vec![-5, 0, 5, 5, 5], "only the upper bound applied");
+        // No bounds, a non-numeric column, and lower>upper all error.
+        assert!(op_clip(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv", "column": "v",
+        }))
+        .is_err());
+        assert!(op_clip(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "column": "v", "lower": 10, "upper": 0,
+        }))
+        .is_err());
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+        let _ = std::fs::remove_file(dstu);
+    }
+
+    #[test]
+    fn op_scale_multiplies_a_numeric_column_by_a_constant() {
+        let src = unique_csv("scale", "v\n1\n2\n3\n");
+        let dst = dst_csv("scale");
+        op_scale(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "column": "v", "factor": 10,
+        }))
+        .unwrap();
+        let vs: Vec<i64> = read_back(&dst)
+            .iter()
+            .map(|x| x["v"].as_i64().unwrap())
+            .collect();
+        assert_eq!(vs, vec![10, 20, 30], "each value multiplied by 10");
+        // Missing factor and non-numeric column error.
+        assert!(op_scale(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv", "column": "v",
+        }))
+        .is_err());
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+    }
+
+    #[test]
+    fn op_add_column_appends_a_constant_typed_column() {
+        let src = unique_csv("addcol", "id\n1\n2\n3\n");
+        let dst = dst_csv("addcol");
+        let r = op_add_column(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "name": "tag", "value": "live", "type": "str",
+        }))
+        .unwrap();
+        assert_eq!(r["columns"], json!(["id", "tag"]), "new column is appended");
+        let rows = read_back(&dst);
+        assert_eq!(rows.len(), 3);
+        assert!(
+            rows.iter().all(|x| x["tag"].as_str() == Some("live")),
+            "every row carries the constant"
+        );
+        // A name that already exists errors.
+        assert!(op_add_column(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "name": "id", "value": 0, "type": "int",
+        }))
+        .is_err());
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+    }
+
+    #[test]
+    fn op_sample_keeps_every_step_th_row_from_offset() {
+        let src = unique_csv("sample", "id\n0\n1\n2\n3\n4\n5\n6\n7\n");
+        // step=3, offset=0 → rows 0,3,6.
+        let dst = dst_csv("sample");
+        let r = op_sample(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+            "step": 3,
+        }))
+        .unwrap();
+        assert_eq!(r["rows"].as_u64().unwrap(), 3);
+        let ids: Vec<i64> = read_back(&dst)
+            .iter()
+            .map(|x| x["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![0, 3, 6], "every 3rd row from offset 0");
+        // step=2, offset=1 → rows 1,3,5,7.
+        let dsto = dst_csv("sampleoff");
+        op_sample(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dsto.to_str().unwrap(), "dst_format": "csv",
+            "step": 2, "offset": 1,
+        }))
+        .unwrap();
+        let idso: Vec<i64> = read_back(&dsto)
+            .iter()
+            .map(|x| x["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(idso, vec![1, 3, 5, 7]);
+        // step 0 errors.
+        assert!(op_sample(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv", "step": 0,
+        }))
+        .is_err());
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+        let _ = std::fs::remove_file(dsto);
+    }
+
+    #[test]
+    fn op_fold_case_lowercases_and_uppercases_column_names() {
+        let src = unique_csv("fold", "ID,Name\n1,a\n2,b\n");
+        // Default = lower.
+        let dst = dst_csv("fold");
+        let r = op_fold_case(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+        }))
+        .unwrap();
+        assert_eq!(r["columns"], json!(["id", "name"]), "names lowercased");
+        let rows = read_back(&dst);
+        assert_eq!(rows[0]["id"].as_i64().unwrap(), 1, "data preserved");
+        // case=upper.
+        let dstu = dst_csv("foldup");
+        let ru = op_fold_case(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dstu.to_str().unwrap(), "dst_format": "csv", "case": "upper",
+        }))
+        .unwrap();
+        assert_eq!(ru["columns"], json!(["ID", "NAME"]), "names uppercased");
+        // A case-fold collision (Id and ID both → id) errors.
+        let coll = unique_csv("foldcoll", "Id,ID\n1,2\n");
+        assert!(op_fold_case(json!({
+            "src": coll.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv",
+        }))
+        .is_err());
+        // An unknown case errors.
+        assert!(op_fold_case(json!({
+            "src": src.to_str().unwrap(), "src_format": "csv",
+            "dst": dst.to_str().unwrap(), "dst_format": "csv", "case": "title",
+        }))
+        .is_err());
+        for p in [&src, &dst, &dstu, &coll] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn op_metadata_reports_format_size_rows_and_types() {
+        let src = unique_csv("meta", "id,name\n1,a\n2,b\n3,c\n");
+        let r = op_metadata(json!({"src": src.to_str().unwrap(), "format": "csv"})).unwrap();
+        assert_eq!(r["format"].as_str().unwrap(), "csv");
+        assert_eq!(r["rows"].as_u64().unwrap(), 3);
+        assert_eq!(r["columns"].as_u64().unwrap(), 2);
+        assert!(r["bytes"].as_u64().unwrap() > 0, "non-empty file size");
+        let types = r["types"].as_object().unwrap();
+        assert!(types.contains_key("id"), "id type present");
+        assert!(types.contains_key("name"), "name type present");
+        // Missing src errors.
+        assert!(op_metadata(json!({"format": "csv"})).is_err());
+        let _ = std::fs::remove_file(src);
     }
 }
