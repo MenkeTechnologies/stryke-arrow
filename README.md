@@ -98,7 +98,7 @@ Arrow::read_stream("events.parquet", callback => fn ($row) {
 
 # Cheap metadata: footer-only for parquet/ipc.
 val $sch = Arrow::schema("sales.parquet")
-p "fields: " . join(", ", map { "$_->{name}:$_->{type}" } @{ $sch->{fields} })
+p "fields: #{join(", ", map { "$_->{name}:$_->{type}" } @{ $sch->{fields} })}"
 
 p Arrow::row_count("sales.parquet")           # parquet footer, no scan
 
