@@ -20,6 +20,8 @@ Apache Arrow + Parquet + Arrow IPC + Feather + arrow-CSV + arrow-JSON for stryke
 
 ### [`strykelang`](https://github.com/MenkeTechnologies/strykelang) &middot; [`MenkeTechnologiesMeta`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta) · [`stryke-parquet`](https://github.com/MenkeTechnologies/stryke-parquet) · [`stryke-duckdb`](https://github.com/MenkeTechnologies/stryke-duckdb) · [`stryke-demo`](https://github.com/MenkeTechnologies/stryke-demo)
 
+### [`Read the Docs`](https://menketechnologies.github.io/stryke-arrow/) &middot; [`Engineering Report`](https://menketechnologies.github.io/stryke-arrow/report.html)
+
 ---
 
 ## Table of Contents
