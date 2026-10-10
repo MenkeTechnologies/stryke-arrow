@@ -50,7 +50,7 @@ parquet hit a different scale:
 
 | Tier | Properties | This package |
 |---|---|---|
-| Core builtins (~40 MB stryke) | small deps, used everywhere | string, math, regex, parallel ops, scipy-class math |
+| Core builtins | small deps, used everywhere | string, math, regex, parallel ops, scipy-class math |
 | Package tier (opt-in) | heavy deps, narrow use cases | parquet, arrow, big-ML, cloud SDKs, niche formats |
 
 `stryke-arrow` ships as a local stryke package + a Rust cdylib
@@ -213,7 +213,7 @@ inputs).
 
 ### `Arrow::write_iter(PATH, sub { … } , %opts) → $n`
 Iterator form: subref returns one row per call, `undef` to stop. Streams to
-the helper without holding all rows in stryke.
+the cdylib without holding all rows in stryke.
 
 ### `Arrow::convert(SRC, DST, %opts) → DST`
 Server-side reader-to-writer pipeline. Options: `src_format`, `dst_format`,
@@ -374,13 +374,8 @@ File-level metadata in one call: detected format, on-disk byte size, row count, 
 Each `Arrow::*` wrapper builds a JSON args dict and calls a sibling
 `arrow__*` symbol resolved out of `libstryke_arrow.{dylib,so}`. The cdylib
 is dlopened in-process on first `use Arrow` (via stryke's
-`pkg::commands::try_load_ffi_for` resolver hook). Its exports span four
-groups: **read** (`version`, `read`, `read_columnar`, `schema`, `stats`),
-**write** (`write`), **conversion** (`convert`), and **compute** (`filter`,
-`select`, `sort`, `slice`, `head`, `tail`, `count`, `concat`, `rename`,
-`cast`, plus aggregation + numeric transforms: `sum`, `mean`, `min_max`,
-`describe`, `aggregate`, `unique`, `clip`, `scale`, `add_column`, `sample`,
-`fold_case`, `metadata`). The authoritative list is `[ffi].exports` in
+`pkg::commands::try_load_ffi_for` resolver hook). Its exports cover reads, writes, conversion, file-to-file compute ops, and
+aggregation / numeric transforms. The authoritative list is `[ffi].exports` in
 `stryke.toml`.
 
 Wire shape (cdylib responses):
@@ -437,7 +432,7 @@ helper-binary discovery — the install dir IS the discovery answer.
 ## [0x09] Tests
 
 ```sh
-cargo test                       # helper CLI contract tests (tests/)
+cargo test                       # Rust-side tests (tests/)
 s test t/                        # end-to-end round-trip per format
 ```
 
@@ -472,8 +467,10 @@ stryke-arrow/
     DataFrame.stk              # `use Arrow::DataFrame`
   t/
     test_arrow.stk             # round-trip tests per format
+    test_compute.stk           # compute-op tests
     test_stryke_arrow_surface.stk  # wrapper-completeness pin
   examples/
+    compute.stk
     csv_to_parquet.stk
     dataframe_bridge.stk
     discover.stk
